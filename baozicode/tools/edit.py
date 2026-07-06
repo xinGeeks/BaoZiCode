@@ -36,6 +36,7 @@ TOOL = ToolDefinition(
         "required": ["file_path", "old_string", "new_string"],
     },
     risk="high",
+    side_effect=True,
 )
 
 

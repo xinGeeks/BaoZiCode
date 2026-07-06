@@ -11,7 +11,7 @@ from baozicode.tools.base import ToolDefinition
 
 
 Role = Literal["user", "assistant", "system", "tool"]
-DeltaType = Literal["text", "thinking", "tool_use", "tool_result"]
+DeltaType = Literal["text", "thinking", "tool_use", "tool_result", "usage"]
 
 
 # --- ContentBlock: discriminated union over text / tool_use / tool_result ---
@@ -92,6 +92,7 @@ class ContentDelta:
     - `type="text"` + `text=...`：普通文本 token
     - `type="tool_use"` + `text=ToolCall(...)`：一个完整的 tool call（已经过 JSON 解析）
     - `type="tool_result"`：极少使用（一般 tool result 由客户端喂回，不通过 stream）
+    - `type="usage"` + `text=UsageStats(...)`：流末尾的 token 用量统计（v0.3 新增）
     """
 
     type: DeltaType

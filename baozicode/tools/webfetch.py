@@ -35,6 +35,7 @@ TOOL = ToolDefinition(
         "required": ["url"],
     },
     risk="low",
+    side_effect=False,
 )
 
 

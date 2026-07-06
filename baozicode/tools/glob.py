@@ -30,6 +30,7 @@ TOOL = ToolDefinition(
         "required": ["pattern"],
     },
     risk="low",
+    side_effect=False,
 )
 
 

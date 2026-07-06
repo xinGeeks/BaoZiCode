@@ -58,6 +58,7 @@ TOOL = ToolDefinition(
         "required": ["command"],
     },
     risk="high",
+    side_effect=True,
 )
 
 

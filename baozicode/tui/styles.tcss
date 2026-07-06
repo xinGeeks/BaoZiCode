@@ -20,13 +20,24 @@ Screen {
 }
 
 /* Textual 8.x: Input 在 Screen 下是兄弟节点。如果不 dock，会按 CSS height 100%
-   占满整个屏幕，把 #chat-scroll (height: 1fr) 挤到 0 行高。 */
+   占满整个屏幕，把 #chat-scroll (height: 1fr) 挤到 0 行高。
+
+   v0.3:StatusBar 也占底部 1 行,与 Input 一起占底部 4 行。
+   把 StatusBar 放在 DOM 里位于 Scroll 与 Input 中间即可,无需 dock。 */
 #input {
     dock: bottom;
     width: 100%;
     height: 3;
     border: tall $secondary;
     padding: 0 1;
+}
+
+StatusBar {
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+    background: $panel;
+    color: $text-muted;
 }
 
 .user-message {

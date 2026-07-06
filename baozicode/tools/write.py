@@ -28,6 +28,7 @@ TOOL = ToolDefinition(
         "required": ["file_path", "content"],
     },
     risk="high",
+    side_effect=True,
 )
 
 

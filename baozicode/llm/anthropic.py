@@ -17,6 +17,7 @@ from typing import Any
 
 from anthropic import AsyncAnthropic
 
+from baozicode.agent.events import UsageStats
 from baozicode.llm.base import (
     ContentDelta,
     LLMClient,
@@ -148,6 +149,25 @@ class AnthropicBackend(LLMClient):
                             ),
                         )
                         current_tool = None
+                elif et == "message_delta":
+                    # 流末尾携带 usage 信息(input/output/cache tokens)
+                    delta = getattr(event, "usage", None)
+                    if delta is not None:
+                        yield ContentDelta(
+                            type="usage",
+                            text=UsageStats(
+                                input_tokens=getattr(delta, "input_tokens", 0) or 0,
+                                output_tokens=getattr(delta, "output_tokens", 0) or 0,
+                                cache_read_tokens=getattr(
+                                    delta, "cache_read_input_tokens", 0
+                                )
+                                or 0,
+                                cache_write_tokens=getattr(
+                                    delta, "cache_creation_input_tokens", 0
+                                )
+                                or 0,
+                            ),
+                        )
 
 
 __all__ = ["AnthropicBackend"]

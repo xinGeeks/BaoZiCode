@@ -32,6 +32,7 @@ TOOL = ToolDefinition(
         "required": ["file_path"],
     },
     risk="low",
+    side_effect=False,
 )
 
 

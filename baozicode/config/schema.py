@@ -40,6 +40,19 @@ class Permissions(BaseModel):
 _DEFAULT_PERMISSIONS = Permissions()
 
 
+class AgentConfig(BaseModel):
+    """v0.3 引入 — Agent 主循环参数。
+
+    `max_iterations` 是安全网,Agent 跑到这个迭代次数还没结束就强制终止
+    (`done.reason=MAX_ITERATIONS_REACHED`)。默认 20 足以应对绝大多数任务,
+    又能在 LLM 进入死循环时及时阻断。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_iterations: int = 20
+
+
 class AppConfig(BaseModel):
     """BaoZiCode 全局配置。
 
@@ -54,6 +67,7 @@ class AppConfig(BaseModel):
     minimax: BackendConfig
     deepseek: BackendConfig
     permissions: Permissions | None = None
+    agent: AgentConfig | None = None
 
     def active(self) -> BackendConfig:
         """返回当前激活后端的配置。"""
@@ -72,8 +86,13 @@ class AppConfig(BaseModel):
         """返回当前生效的 permissions,`None` 时回退到全默认。"""
         return self.permissions if self.permissions is not None else _DEFAULT_PERMISSIONS
 
+    def active_agent(self) -> AgentConfig:
+        """返回当前生效的 agent 配置,`None` 时回退到全默认(max_iterations=20)。"""
+        return self.agent if self.agent is not None else AgentConfig()
+
 
 __all__ = [
+    "AgentConfig",
     "AppConfig",
     "BackendConfig",
     "BackendName",

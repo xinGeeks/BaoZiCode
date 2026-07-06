@@ -39,12 +39,20 @@ def decode_subprocess_output(data: bytes) -> str:
 
 @dataclass
 class ToolDefinition:
-    """工具的静态描述，喂给 LLM 让它知道这个工具能干嘛。"""
+    """工具的静态描述，喂给 LLM 让它知道这个工具能干嘛。
+
+    `side_effect` (v0.3 新增):声明此工具调用是否有外部副作用。
+    - True:Write / Edit / Bash —— 改文件或执行 shell 命令
+    - False:Read / Grep / Glob / WebFetch —— 只读,可并发
+    调度器用此字段决定并发 vs 串行;Plan Mode 用此字段做工具过滤。
+    默认 False 保证 v0.2 调用方零修改。
+    """
 
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema
     risk: Risk = "low"
+    side_effect: bool = False
 
     def to_anthropic(self) -> dict[str, Any]:
         """转换为 Anthropic SDK 的 tool 格式。"""

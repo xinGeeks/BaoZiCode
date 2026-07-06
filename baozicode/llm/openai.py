@@ -17,6 +17,7 @@ from typing import Any, ClassVar
 
 from openai import AsyncOpenAI
 
+from baozicode.agent.events import UsageStats
 from baozicode.llm.base import (
     ContentDelta,
     LLMClient,
@@ -110,14 +111,30 @@ class OpenAICompatibleBackend(LLMClient):
             "model": self._model,
             "messages": sdk_messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             params["tools"] = [t.to_openai() for t in tools]
 
         tool_acc: dict[int, dict[str, str]] = {}
+        usage_yielded = False
 
         stream = await self._client.chat.completions.create(**params)
         async for chunk in stream:
+            # 用量信息(流末尾的 chunk.choices 为空,但 chunk.usage 有值)
+            if getattr(chunk, "usage", None) is not None and not usage_yielded:
+                u = chunk.usage
+                yield ContentDelta(
+                    type="usage",
+                    text=UsageStats(
+                        input_tokens=getattr(u, "prompt_tokens", 0) or 0,
+                        output_tokens=getattr(u, "completion_tokens", 0) or 0,
+                        # OpenAI 不暴露 cache tokens(留给各家扩展字段)
+                        cache_read_tokens=getattr(u, "cached_tokens", 0) or 0,
+                        cache_write_tokens=0,
+                    ),
+                )
+                usage_yielded = True
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]
@@ -164,6 +181,10 @@ class OpenAICompatibleBackend(LLMClient):
                     error=err,
                 ),
             )
+
+        # 兜底:某些 backend 不发 usage chunk 时 yield 0
+        if not usage_yielded:
+            yield ContentDelta(type="usage", text=UsageStats())
 
 
 class OpenAIBackend(OpenAICompatibleBackend):

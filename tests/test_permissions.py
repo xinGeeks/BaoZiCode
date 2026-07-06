@@ -1,11 +1,15 @@
-"""Permissions 模型 + ChatScreen 应用逻辑的单元测试。"""
+"""Permissions 模型 + Agent 应用逻辑的单元测试。"""
 
 import sys
 from pathlib import Path
+from typing import AsyncIterator
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from baozicode.agent.loop import Agent
 from baozicode.config.schema import AppConfig, BackendConfig, Permissions
+from baozicode.conversation.manager import ConversationManager
+from baozicode.llm.base import ContentDelta, LLMClient, Message
 from baozicode.tools.base import ToolCall
 
 
@@ -20,6 +24,21 @@ def _cfg(perms: Permissions | None) -> AppConfig:
     )
 
 
+class _NoopLLM(LLMClient):
+    async def stream(self, messages: list[Message], system=None, tools=None) -> AsyncIterator[ContentDelta]:
+        if False:
+            yield ContentDelta(type="text", text="")
+
+
+def _make_agent(perms: Permissions) -> Agent:
+    return Agent(
+        llm_client=_NoopLLM(),
+        tools=[],
+        conversation=ConversationManager(),
+        permissions=perms,
+    )
+
+
 def test_default_permissions_when_none() -> None:
     """permissions=None 时 active_permissions() 返回全默认。"""
     cfg = _cfg(None)
@@ -28,7 +47,7 @@ def test_default_permissions_when_none() -> None:
     assert p.deny == []
     assert p.batch_confirm is False
     assert p.bash_locked_cwd is False
-    print("[OK] default permissions when None")
+    print("[OK] default permissions when none")
 
 
 def test_explicit_permissions_override() -> None:
@@ -60,49 +79,39 @@ def test_unknown_permission_key_ignored() -> None:
 
 def test_deny_exact_match() -> None:
     """deny=['Bash'] 直接匹配 Bash。"""
-    from baozicode.tui.chat_screen import ChatScreen
-    screen = ChatScreen()
+    agent = _make_agent(Permissions(deny=["Bash"]))
     call = ToolCall(id="1", name="Bash", arguments={"command": "ls"})
-    perms = Permissions(deny=["Bash"])
-    assert screen._matches_deny(call, perms)
+    assert agent._matches_deny(call)
     print("[OK] deny exact match")
 
 
 def test_deny_glob_match() -> None:
     """deny=['*sudo*'] 通过 fnmatch 匹配 arguments.command。"""
-    from baozicode.tui.chat_screen import ChatScreen
-    screen = ChatScreen()
+    agent = _make_agent(Permissions(deny=["*sudo*"]))
     call = ToolCall(id="1", name="Bash", arguments={"command": "sudo rm -rf /"})
-    perms = Permissions(deny=["*sudo*"])
-    assert screen._matches_deny(call, perms)
+    assert agent._matches_deny(call)
     print("[OK] deny glob pattern match")
 
 
 def test_deny_no_match() -> None:
     """deny 不命中时返回 False。"""
-    from baozicode.tui.chat_screen import ChatScreen
-    screen = ChatScreen()
+    agent = _make_agent(Permissions(deny=["Bash"]))
     call = ToolCall(id="1", name="Read", arguments={"file_path": "/etc/passwd"})
-    perms = Permissions(deny=["Bash"])
-    assert not screen._matches_deny(call, perms)
+    assert not agent._matches_deny(call)
     print("[OK] no deny match → False")
 
 
 def test_auto_allow_match() -> None:
-    from baozicode.tui.chat_screen import ChatScreen
-    screen = ChatScreen()
+    agent = _make_agent(Permissions(auto_allow=["Grep"]))
     call = ToolCall(id="1", name="Grep", arguments={"pattern": "x"})
-    perms = Permissions(auto_allow=["Grep"])
-    assert screen._is_auto_allowed(call, perms)
+    assert agent._is_auto_allowed(call)
     print("[OK] auto_allow match")
 
 
 def test_auto_allow_no_match() -> None:
-    from baozicode.tui.chat_screen import ChatScreen
-    screen = ChatScreen()
+    agent = _make_agent(Permissions(auto_allow=["Read"]))
     call = ToolCall(id="1", name="Bash", arguments={"command": "ls"})
-    perms = Permissions(auto_allow=["Read"])
-    assert not screen._is_auto_allowed(call, perms)
+    assert not agent._is_auto_allowed(call)
     print("[OK] no auto_allow match")
 
 
@@ -120,6 +129,24 @@ def test_low_risk_tool_risk() -> None:
     print("[OK] tool risk classifications")
 
 
+def test_side_effect_classifications_v030() -> None:
+    """v0.3:side_effect 与 risk 不完全等价。Read 等 4 个是 read-only,
+    Write/Edit/Bash 是 side_effect=True。"""
+    from baozicode.tools.registry import get_all_tools
+
+    effects = {t.name: t.side_effect for t in get_all_tools()}
+    assert effects == {
+        "Read": False,
+        "Write": True,
+        "Edit": True,
+        "Bash": True,
+        "Grep": False,
+        "Glob": False,
+        "WebFetch": False,
+    }
+    print("[OK] side_effect classifications")
+
+
 if __name__ == "__main__":
     test_default_permissions_when_none()
     test_explicit_permissions_override()
@@ -130,4 +157,5 @@ if __name__ == "__main__":
     test_auto_allow_match()
     test_auto_allow_no_match()
     test_low_risk_tool_risk()
+    test_side_effect_classifications_v030()
     print("\nAll permission tests passed.")

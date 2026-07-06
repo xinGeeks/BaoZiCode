@@ -3,6 +3,7 @@
 
 # 当前使用的后端：anthropic | openai | minimax | deepseek
 backend: anthropic
+# v0.3 当前版本
 
 # 全局系统提示（每个 backend 共用）
 system_prompt: "You are BaoZiCode, a helpful AI coding assistant."
@@ -60,3 +61,13 @@ deepseek:
 #     - "Bash:*sudo*"
 #   batch_confirm: true
 #   bash_locked_cwd: false
+
+# Agent 主循环配置（v0.3 新增；整个块可省略，省略时全用默认）
+#
+# max_iterations：Agent 单次 run 的最大迭代轮次（兜底安全网）
+#   默认 20 —— 足以应对绝大多数多步任务，又能在 LLM 进入死循环时及时阻断
+#   常见场景：Read 多文件 + Edit 多处 = 5-10 轮；批量重构 = 10-15 轮
+#   调到 50 用于长任务（如迁移整个模块），调到 10 用于受限场景
+#
+# agent:
+#   max_iterations: 20

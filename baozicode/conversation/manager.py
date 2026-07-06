@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from baozicode.llm.base import Message, TextBlock, ToolResultBlock, ToolUseBlock
 from baozicode.tools.base import ToolCall, ToolResult
+
+if TYPE_CHECKING:
+    from baozicode.agent.collector import TurnSnapshot
 
 
 class ConversationManager:
@@ -61,6 +66,17 @@ class ConversationManager:
             is_error=result.is_error,
         )
         msg = Message(role="tool", content=[block])
+        self._messages.append(msg)
+        return msg
+
+    def add_turn(self, snapshot: "TurnSnapshot") -> Message:
+        """从 TurnSnapshot 重建 assistant Message 并入库。
+
+        v0.3 Agent 的标准入库路径 —— TurnSnapshot 是 LLM 决策的唯一可信源,
+        通过 TurnSnapshot.to_message() 重建,保证 tool_use id/name/arguments
+        字节级一致。
+        """
+        msg = snapshot.to_message()
         self._messages.append(msg)
         return msg
 
