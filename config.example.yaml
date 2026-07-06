@@ -1,0 +1,42 @@
+# BaoZiCode 配置文件示例
+# 复制本文件为 config.yaml，然后填入你的偏好
+
+# 当前使用的后端：anthropic | openai | minimax | deepseek
+backend: anthropic
+
+# 全局系统提示（每个 backend 共用）
+system_prompt: "You are BaoZiCode, a helpful AI coding assistant."
+
+# 注意：四个后端的配置块全部必填。
+# 即使当前用 anthropic，也要填好 minimax / deepseek 两块（key 和 model）。
+# 这样切换后端只需改 `backend:` 一行，config 不会"半缺失"。
+
+# Anthropic 后端配置
+anthropic:
+  # API Key 通过环境变量加载，YAML 里用 ${VAR_NAME} 占位
+  api_key: ${ANTHROPIC_API_KEY}
+  model: claude-sonnet-4-6
+  # base_url 可选，默认 https://api.anthropic.com
+  # base_url: https://api.anthropic.com
+
+# OpenAI 后端配置
+openai:
+  api_key: ${OPENAI_API_KEY}
+  model: gpt-5
+  # base_url 可选，默认 https://api.openai.com/v1
+  # base_url: https://api.openai.com/v1
+
+# MiniMax 后端配置（项目方自研模型，OpenAI 兼容）
+# ⚠️ DEFAULT_BASE_URL 是占位猜测值，请按 MiniMax 官方文档改成正确地址
+minimax:
+  api_key: ${MINIMAX_API_KEY}
+  model: MiniMax-M3
+  # base_url 可选，默认 https://api.minimaxi.com/v1（占位）
+  # base_url: https://your-actual-minimax-endpoint/v1
+
+# DeepSeek 后端配置（OpenAI 兼容）
+deepseek:
+  api_key: ${DEEPSEEK_API_KEY}
+  model: deepseek-chat
+  # base_url 可选，默认 https://api.deepseek.com/v1
+  # base_url: https://api.deepseek.com/v1

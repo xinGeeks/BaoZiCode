@@ -1,0 +1,85 @@
+/* BaoZiCode TUI 样式 */
+
+Screen {
+    background: $surface;
+}
+
+#chat-scroll {
+    height: 1fr;
+    border: tall $primary;
+    border-title-align: left;
+    padding: 1 1;
+}
+
+/* Textual 8.x: VerticalScroll 里的子节点默认 height 不是 auto，
+   必须显式声明才能撑出实际行高（否则 banner / Static / Markdown 都塌成 1 行） */
+#chat-scroll > Static,
+#chat-scroll > Markdown {
+    width: 100%;
+    height: auto;
+}
+
+/* Textual 8.x: Input 在 Screen 下是兄弟节点。如果不 dock，会按 CSS height 100%
+   占满整个屏幕，把 #chat-scroll (height: 1fr) 挤到 0 行高。 */
+#input {
+    dock: bottom;
+    width: 100%;
+    height: 3;
+    border: tall $secondary;
+    padding: 0 1;
+}
+
+.user-message {
+    color: $success;
+    text-style: bold;
+    margin: 1 0 0 0;
+}
+
+.assistant-message {
+    color: $text;
+    margin: 0 0 1 0;
+}
+
+.error-message {
+    color: $error;
+    text-style: bold;
+}
+
+.info-message {
+    color: $accent;
+    text-style: italic;
+}
+
+SystemMessage {
+    color: $warning;
+    text-style: bold;
+}
+
+ModelSelectScreen {
+    align: center middle;
+}
+
+#model-dialog {
+    width: 60;
+    height: auto;
+    border: thick $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#model-dialog > Label {
+    width: 100%;
+    content-align: center middle;
+    margin-bottom: 1;
+}
+
+#model-buttons {
+    layout: vertical;
+    height: auto;
+    align-horizontal: center;
+}
+
+#model-buttons Button {
+    width: 100%;
+    margin: 0 0 0 0;
+}

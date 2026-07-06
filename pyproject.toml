@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "baozicode"
+version = "0.1.0"
+description = "BaoZiCode - 一个用 Python 开发的命令行 AI 编码助手"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "BaoZiCode Authors" }]
+dependencies = [
+    "textual>=8.0,<9.0",
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    "pydantic>=2.5.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.1",
+]
+
+[project.scripts]
+baozicode = "baozicode.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["baozicode"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"config.example.yaml" = "baozicode/config.example.yaml"
+".env.example" = "baozicode/.env.example"
