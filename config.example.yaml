@@ -40,3 +40,23 @@ deepseek:
   model: deepseek-chat
   # base_url 可选，默认 https://api.deepseek.com/v1
   # base_url: https://api.deepseek.com/v1
+
+# 工具调用权限控制（v0.2 新增；整个块可省略，省略时全用默认）
+#
+# auto_allow：列出的工具名跳过高风险确认 Modal（仍执行，仍记录卡片）
+#   典型用途：把 Grep/Glob 这类只读工具加进去，减少弹窗
+# deny：列出的工具名/glob 永远拒绝（命中即 is_error，不弹 Modal）
+#   典型用途：临时禁掉危险工具，无需改代码
+# batch_confirm：高风险工具连续同类型 ≥2 次时，第一次 Modal 提供 "Allow all remaining"
+#   默认 false —— 单 Modal 确认是主线，避免误操作
+# bash_locked_cwd：true 时 Bash 不跟随 cd，永远在 project_root 执行
+#   默认 false —— 跟随 cd 是日常场景；锁住适合 CI/批量任务
+#
+# permissions:
+#   auto_allow:
+#     - Grep
+#     - Glob
+#   deny:
+#     - "Bash:*sudo*"
+#   batch_confirm: true
+#   bash_locked_cwd: false

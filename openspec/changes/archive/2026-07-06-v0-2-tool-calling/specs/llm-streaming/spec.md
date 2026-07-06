@@ -1,8 +1,5 @@
-# llm-streaming Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change v0-1-tui-multiturn-streaming. Update Purpose after archive.
-## Requirements
 ### Requirement: LLMClient abstract interface
 The system MUST provide an abstract base class `LLMClient` defining a single async generator method `stream(messages, system, tools)` that yields `ContentDelta` objects, so that all backends present a uniform interface to the UI layer. The system MUST support four concrete backends: `AnthropicBackend` (Anthropic API), `OpenAIBackend` (OpenAI API), `MiniMaxBackend` (MiniMax API, OpenAI-compatible), and `DeepSeekBackend` (DeepSeek API, OpenAI-compatible). `OpenAIBackend`, `MiniMaxBackend`, and `DeepSeekBackend` MUST share a common `OpenAICompatibleBackend` base class. The `tools` parameter is a `list[ToolDefinition] | None`; when `None` or empty, the backend MUST NOT send a `tools` parameter to its underlying SDK (preserving v0.1 behavior).
 
@@ -116,6 +113,8 @@ The system MUST allow exceptions thrown by any of the four LLM SDKs to bubble up
 - **WHEN** the underlying SDK raises a connection or auth exception during streaming
 - **THEN** the exception propagates out of `DeepSeekBackend.stream`
 
+## ADDED Requirements
+
 ### Requirement: Backends handle malformed tool_use gracefully
 The system MUST catch JSON parse errors that occur while accumulating an Anthropic `input_json_delta` stream, and yield a single `ContentDelta(type="tool_use", text=ToolCall(id=..., name=..., arguments={}, error=<exception message>))` instead of letting the exception propagate. This prevents a malformed tool invocation from crashing the entire conversation turn.
 
@@ -124,4 +123,3 @@ The system MUST catch JSON parse errors that occur while accumulating an Anthrop
 - **THEN** the yielded `ToolCall.arguments` is an empty dict
 - **AND** the `ToolCall` carries an `error` attribute (or accessible diagnostic) describing the parse failure
 - **AND** the UI surfaces this as a failed tool call (e.g., a red ✗ card) rather than a hard crash
-

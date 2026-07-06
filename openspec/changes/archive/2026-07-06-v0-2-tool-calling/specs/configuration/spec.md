@@ -1,8 +1,5 @@
-# configuration Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change v0-1-tui-multiturn-streaming. Update Purpose after archive.
-## Requirements
 ### Requirement: YAML config file is loaded at startup
 The system MUST load a YAML configuration file at startup and validate it against the `AppConfig` Pydantic schema before any LLM client is constructed.
 
@@ -86,6 +83,8 @@ The system MUST provide these defaults when fields are omitted from the YAML:
 - **THEN** the loaded `BackendConfig.base_url` falls back to that backend's provider default
 - **AND** if the YAML explicitly sets `base_url: null`, the same default is used
 
+## ADDED Requirements
+
 ### Requirement: Permissions block configures tool-calling policy
 The system MUST accept an optional `permissions:` block in the YAML config that governs the v0.2 tool-calling behavior. If the block is absent, all permissions default to: high-risk tools require confirmation, low-risk tools are auto-allowed, batch confirmation is disabled, Bash cwd follows the session with safety boundary enforcement.
 
@@ -121,4 +120,3 @@ The system MUST accept an optional `permissions:` block in the YAML config that 
 #### Scenario: /permissions displays the effective policy
 - **WHEN** the user runs `/permissions` in the TUI
 - **THEN** the conversation area shows the resolved settings (auto_allow list, deny list, batch_confirm, bash_locked_cwd) and which ones came from defaults vs explicit config
-

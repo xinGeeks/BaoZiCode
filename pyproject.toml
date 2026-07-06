@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "baozicode"
-version = "0.1.0"
+version = "0.2.0"
 description = "BaoZiCode - 一个用 Python 开发的命令行 AI 编码助手"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,7 +17,13 @@ dependencies = [
     "pydantic>=2.5.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.1",
+    "httpx>=0.27.0",
 ]
+
+[project.optional-dependencies]
+# ripgrep 可选 — Grep 工具会自动 fallback 到 Python re。
+# 用户系统装好 `rg` 命令即可，无需 pip。
+rg = []
 
 [project.scripts]
 baozicode = "baozicode.cli:main"

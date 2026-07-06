@@ -1,8 +1,5 @@
-# interactive-tui Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change v0-1-tui-multiturn-streaming. Update Purpose after archive.
-## Requirements
 ### Requirement: TUI launches with banner and welcome
 The system MUST display an ASCII 包子 (baozi) banner and a short welcome message in the conversation area when the user starts `baozicode`.
 
@@ -94,6 +91,8 @@ The system MUST catch any exception thrown by the LLM client during streaming, r
 - **THEN** the conversation area shows an authentication-specific error message
 - **AND** the input box is re-enabled
 
+## ADDED Requirements
+
 ### Requirement: Tool invocations are rendered as visible cards in the conversation
 The system MUST render every tool invocation as a visible "card" widget in the conversation area: a 🔧 card showing the tool name and arguments before execution, and a 📄 card showing the result content (truncated if very long) after execution. Cards MUST appear in the conversation area in the order they occur during the stream.
 
@@ -145,4 +144,3 @@ The system MUST NOT remove tool cards from the conversation area when `/clear` i
 - **WHEN** a tool execution raises an exception (e.g., file not found)
 - **THEN** the 🔧 card remains visible
 - **AND** the 📄 card is replaced with a red ✗ card showing the error message
-
