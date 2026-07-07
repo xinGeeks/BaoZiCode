@@ -13,11 +13,13 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
 - 🔌 **四后端** — Anthropic Claude / OpenAI GPT / MiniMax / DeepSeek，YAML 一键切换
 - 🎨 **Textual TUI** — 现代终端界面，输入框、流式输出、ASCII 包子 banner
 - 🛠️ **斜杠命令** — `/help` `/clear` `/exit` `/model` `/tools` `/permissions` +
-  `/plan` `/do` `/auto` `/stop` `/status`
+  `/plan` `/do` `/auto` `/stop` `/status` `/mcp`
 - 🔁 **Agent Loop（v0.3 核心）** — ReAct 自主循环,一次消息可跨多轮(默认 20 轮),
   自动判断何时停止(模型说完 / 迭代上限 / 取消 / 连续幻觉 / 拒绝累积 / 失败死循环)
 - 🧰 **7 个工具** — Read / Write / Edit / Bash / Grep / Glob / WebFetch,side_effect 标记驱动并发调度
 - 🔒 **权限控制** — 五层防御(v0.5):L1 黑名单 / L2 沙箱 / L3 规则引擎 / L4 模式(strict/default/permissive) / L5 人在回路
+- 🔌 **MCP 集成（v0.6 新增）** — 启动时自动发现外部 MCP server(stdio / Streamable HTTP),
+  把 server 暴露的工具接进工具中心;`/mcp` slash 命令查看 server 状态 / 重连
 - 📋 **Plan Mode（v0.3）** — `/plan <task>` 先读后规划,`/do` 再切全工具执行
 - 🧱 **模块化 system prompt（v0.4 新增）** — 11 段拼装,稳定指令走 LLM 缓存通道,
   动态指令通过 `<system-reminder>` 注入,7 条规则可独立开关
@@ -117,6 +119,8 @@ python -m baozicode  # 等价
 | `/auto` | 切换 auto 模式（跳过本会话所有 Modal） |
 | `/stop` | 取消正在运行的 Agent（Esc / Ctrl+C 同效） |
 | `/status` | 显示 mode / backend / model / token 累计 |
+| `/mcp` | 查看 MCP server 状态（v0.6） |
+| `/mcp reconnect <name>` | 重连指定 MCP server |
 
 **Plan Mode 典型工作流**:
 ```
@@ -203,6 +207,55 @@ rules:
 - `.baozicode/permissions.local.yaml` 加进 `.gitignore`(本机偏好不进版本控制)
 - 项目级规则放 `.baozicode/permissions.yaml` 提交进 git,团队共享
 
+## MCP 集成（v0.6）
+
+BaoZiCode 在启动时自动发现外部 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server,
+把 server 暴露的工具无缝接进工具中心 — Agent 调用时完全无感,跟内置 7 个工具一样用。
+
+### 配置
+
+在 `config.yaml` 顶层加 `mcp_servers` 块:
+
+```yaml
+mcp_servers:
+  # stdio:本地子进程走 stdin/stdout 管道
+  fs:
+    type: stdio
+    command: python
+    args: ["-m", "mcp_server_filesystem", "/path/to/root"]
+    env:
+      MCP_LOG_LEVEL: DEBUG
+    # init_timeout_s: 5        # 单步握手超时
+    # tools_list_timeout_s: 8
+    # startup_total_timeout_s: 15  # 整段握手超时
+    # call_timeout_s: 60
+
+  # Streamable HTTP:远程走 HTTP POST
+  remote:
+    type: http
+    url: https://example.com/mcp
+    headers:
+      Authorization: "Bearer ${REMOTE_MCP_TOKEN}"
+```
+
+两层配置合并:用户级 `~/.config/baozicode/config.yaml` 和项目级 `./config.yaml` 都可声明
+`mcp_servers`,**项目级按 server 名覆盖用户级**,合并前对 `command` / `args` / `env` /
+`url` / `headers` 内的 `${VAR}` 占位符做展开(走现有 `_substitute_env`)。
+
+### 工具命名
+
+MCP 工具统一以 `mcp__<server>__<tool>` 形式命名(避免与内置 7 工具冲突),
+例如上面 `fs` server 暴露 `read_file` 工具时,Agent 看到的是 `mcp__fs__read_file`。
+Agent 内部的 `_v5_executor` 对这些工具同样走五层防御权限检查:
+- 路径参数(`file_path` / `dir` / `path` 等启发式扫到的)走 L2 沙箱
+- Bash MCP 工具(`risk=high` / `side_effect=true` 的默认推断)走 L1 黑名单
+
+### 失败降级
+
+单个 server 启动失败(超时 / 命令找不到 / HTTP 404)不影响其它 server:
+CLI 启动 banner 会打印 `N connected, M failed`,TUI 内可用 `/mcp` 看到完整状态。
+`/mcp reconnect <name>` 可单独重跑指定 server 的握手。
+
 ## 项目结构
 
 ```
@@ -238,10 +291,18 @@ baozicode/
 │   ├── deepseek.py          # DeepSeek 后端（OpenAI 兼容）
 │   └── factory.py           # 后端选择
 ├── tools/                  # 7 个工具 + side_effect 标记
-│   ├── base.py              # ToolDefinition (side_effect) / ToolCall / ToolResult
+│   ├── base.py              # ToolDefinition (side_effect + path_args) / ToolCall / ToolResult
 │   ├── read.py / write.py / edit.py / bash.py
 │   ├── grep.py / glob.py / webfetch.py
-│   └── registry.py          # get_all_tools / execute_tool
+│   └── registry.py          # ToolRegistry 类 + 模块级兼容层(v0.6 支持运行时 MCP 注入)
+├── mcp/                     # v0.6 新增 — MCP 客户端
+│   ├── types.py             # JsonRpcRequest/Response/Error/Notification + McpTool/McpCallResult
+│   ├── jsonrpc.py           # JsonRpcDispatcher(请求/响应 id 配对)
+│   ├── transport_stdio.py   # StdioTransport(子进程管道 + stderr drain task)
+│   ├── transport_http.py    # HttpTransport(Streamable HTTP + SSE + Mcp-Session-Id)
+│   ├── client.py            # McpSession(initialize → initialized → tools/list)
+│   ├── adapter.py           # MCP ↔ ToolDefinition / ToolResult 转换
+│   └── manager.py           # McpClientManager(多 server 生命周期 + 失败降级)
 ├── conversation/
 │   └── manager.py          # 多轮历史（add_turn snapshot 重建 / add_tool_result）
 └── config/

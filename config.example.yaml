@@ -160,3 +160,35 @@ deepseek:
 #     - tool: Edit
 #       pattern: "*.env"
 #       decision: deny
+
+# MCP 外部 server 配置（v0.6 新增；整个块可省略，省略时不启动 MCP）
+#
+# 两层配置合并：用户级 ~/.config/baozicode/config.yaml 和项目级 config.yaml
+# 都可声明 mcp_servers，项目级按 server 名覆盖用户级。
+# command / args / env / url / headers 内的 ${VAR} 占位符在合并后展开。
+#
+# 两种传输:
+# - type: stdio — 本地子进程走 stdin/stdout 管道
+# - type: http  — 远程走 Streamable HTTP POST
+#
+# 超时字段(全部可选,单位秒):
+# - init_timeout_s: 5          # initialize 单步超时
+# - tools_list_timeout_s: 8    # tools/list 单步超时
+# - startup_total_timeout_s: 15 # 整段握手超时(per server)
+# - call_timeout_s: 60         # 单次 tools/call 超时
+#
+# mcp_servers:
+#   # stdio 例子:本地文件系统 MCP server
+#   fs:
+#     type: stdio
+#     command: python
+#     args: ["-m", "mcp_server_filesystem", "/tmp/root"]
+#     env:
+#       MCP_LOG_LEVEL: DEBUG
+#
+#   # http 例子:远程 MCP server
+#   remote:
+#     type: http
+#     url: https://mcp.example.com/v1
+#     headers:
+#       Authorization: "Bearer ${REMOTE_MCP_TOKEN}"

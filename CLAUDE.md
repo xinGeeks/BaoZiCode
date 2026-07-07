@@ -1,6 +1,24 @@
 项目名：BaoZiCode
 本地语言：中文
 
+## v0.6 范围
+
+v0.5 之上加一层：MCP (Model Context Protocol) 客户端,启动时自动发现外部 MCP server,
+把 server 暴露的工具接进工具中心。两种传输：stdio（子进程管道）和 Streamable HTTP；
+三步握手：initialize / notifications/initialized / tools/list；tools/call 在 Agent
+调用时跑。失败降级（per-server try/except,banner 警告）；断开时 mark broken +
+is_error 返回；`/mcp` slash 命令查看 server 状态 + reconnect。
+
+`baozicode/mcp/manager.McpClientManager` 是编排器,持有 `states: dict[name, ServerState]`
+（status / error / tools / session）。Agent 通过 `_default.get_all_tools()` 自动看到
+MCP 工具——因为 manager 在 bootstrap 时把每个 MCP 工具都注册到 `ToolRegistry`,
+五层防御权限（`_v5_executor`）对 `mcp__<server>__<tool>` 工具同样生效:
+- 路径参数（`file_path` / `dir` / `path` 启发式扫到的）走 L2 沙箱
+- 默认保守值 `risk=high` / `side_effect=true` / `path_args=[]`（无 schema 时）走 L1 黑名单
+
+`tools/registry.py` v0.6 改为 `ToolRegistry` 类（内置 7 工具 + 运行时 MCP 注入）,
+模块级 `_default = ToolRegistry()` 单例 + 顶层函数兼容层,12 个调用点零修改。
+
 ## v0.5 范围
 
 v0.4 之上加一层：五层防御权限系统。L1 硬拦截危险命令、L2 路径沙箱、L3 三层 YAML
@@ -17,8 +35,8 @@ v0.4 之上加一层：五层防御权限系统。L1 硬拦截危险命令、L2 
 ```
 baozicode/
 ├── __main__.py             # python -m baozicode
-├── cli.py                  # argparse 入口
-├── app.py                  # Textual App（v0.5 持有 permissions_v5 / engine / session_mode）
+├── cli.py                  # argparse 入口(v0.6:MCP bootstrap + banner)
+├── app.py                  # Textual App(v0.5 + v0.6:mcp_manager 字段)
 ├── agent/                  # v0.3 — Agent Loop 与事件契约(v0.4 + v0.5 5 层权限)
 │   ├── events.py           # AgentEvent / StopReason / UsageStats / Progress
 │   ├── collector.py        # StreamCollector + TurnSnapshot(双路收集)
@@ -42,7 +60,7 @@ baozicode/
 │   ├── sections/           # 11 个 section renderer(7 固定 + env_info + 3 可选)
 │   └── __init__.py         # 公开 API re-export
 ├── tui/
-│   ├── chat_screen.py      # 主对话屏幕 + Agent 事件订阅 + slash 命令(v0.5:/permissions mode)
+│   ├── chat_screen.py      # 主对话屏幕 + Agent 事件订阅 + slash 命令(v0.5:/permissions mode;v0.6:/mcp)
 │   ├── tool_card.py        # ToolCallCard / ToolResultCard 组件
 │   ├── permission_modal.py # v0.5:4 档 Modal(Y/A/P/N) + derive_glob_pattern
 │   ├── banner.py           # ASCII 包子
@@ -63,13 +81,23 @@ baozicode/
 │   ├── grep.py             # side_effect=False, path_args=["path"]
 │   ├── glob.py             # side_effect=False, path_args=["path"]
 │   ├── webfetch.py         # side_effect=False, path_args=[]
-│   └── registry.py         # get_all_tools / execute_tool
+│   └── registry.py         # v0.6:ToolRegistry 类 + 模块级兼容层(支持 MCP 运行时注入)
+├── mcp/                    # v0.6 新增 — MCP 客户端
+│   ├── types.py            # JsonRpcRequest/Response/Error/Notification + McpTool/McpCallResult
+│   ├── jsonrpc.py          # JsonRpcDispatcher(请求/响应 id 配对)
+│   ├── transport_stdio.py  # StdioTransport(子进程管道 + stderr drain task)
+│   ├── transport_http.py   # HttpTransport(Streamable HTTP + SSE + Mcp-Session-Id)
+│   ├── client.py           # McpSession(initialize → initialized → tools/list)
+│   ├── adapter.py          # MCP ↔ ToolDefinition / ToolResult 转换(路径 args 启发式)
+│   └── manager.py          # McpClientManager(多 server 生命周期 + 失败降级)
 ├── conversation/
 │   └── manager.py          # 多轮历史(add_turn snapshot 重建,add_tool_result)
 └── config/
     ├── schema.py           # Pydantic AppConfig / BackendConfig / Permissions / AgentConfig / RulesConfig
     │                        #   v0.5 新增:PermissionRuleYaml / PermissionsV5 / AgentConfig.denial_warn_threshold
-    └── loader.py           # YAML + .env + ${VAR} 替换(v0.5:扫 permissions*.yaml sidecar 合并)
+    │                        #   v0.6 新增:McpServerStdioConfig / McpServerHttpConfig / AppConfig.mcp_servers
+    └── loader.py           # YAML + .env + ${VAR} 替换(v0.5:扫 permissions*.yaml sidecar 合并;
+                             #   v0.6:两层 mcp_servers 合并 + ${VAR} 展开)
 ```
 
 ## 依赖方向（不要打破）
@@ -151,5 +179,5 @@ permissions/ ───→ config/ + tools/base.py          (v0.5 新增单向依
 
 ## OpenSpec
 
-`openspec/changes/` 下是 spec-driven 的变更提案。已完成 `v0-1 / v0-2 / v0-3-agent-loop / v0-4-prompt`(已归档)。
-活跃 / 进行中的变更:`v0-5-permissions`（五层防御权限系统）。
+`openspec/changes/` 下是 spec-driven 的变更提案。已完成 `v0-1 / v0-2 / v0-3-agent-loop / v0-4-prompt / v0-5-permissions`(已归档)。
+活跃 / 进行中的变更:`v0-6-mcp-client`（MCP 客户端,自动发现外部 server + 工具接入）。
