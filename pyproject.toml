@@ -24,9 +24,19 @@ dependencies = [
 # ripgrep 可选 — Grep 工具会自动 fallback 到 Python re。
 # 用户系统装好 `rg` 命令即可，无需 pip。
 rg = []
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+]
 
 [project.scripts]
 baozicode = "baozicode.cli:main"
+
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 
 [tool.hatch.build.targets.wheel]
 packages = ["baozicode"]
