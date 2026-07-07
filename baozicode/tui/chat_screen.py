@@ -63,6 +63,7 @@ SLASH_COMMANDS = (
     "/auto",
     "/stop",
     "/status",
+    "/mcp",
 )
 
 
@@ -261,6 +262,8 @@ class ChatScreen(Screen):
             self._handle_stop()
         elif cmd == "/status":
             self._show_status()
+        elif cmd == "/mcp":
+            await self._handle_mcp(args.strip())
 
     # ---- slash command handlers ----
 
@@ -278,7 +281,9 @@ class ChatScreen(Screen):
             "- `/do [task]` — 退出 plan mode，跑 Agent；带 task 直接跑\n"
             "- `/auto` — 切换 auto 模式（本会话跳过所有 Modal）\n"
             "- `/stop` — 取消正在运行的 Agent（Esc/Ctrl+C 同样有效）\n"
-            "- `/status` — 显示 mode / backend / model / token 累计\n\n"
+            "- `/status` — 显示 mode / backend / model / token 累计\n"
+            "- `/mcp` — 查看 MCP server 状态（v0.6）\n"
+            "- `/mcp reconnect <name>` — 重连指定 MCP server\n\n"
             "**v0.3 关键变化**\n\n"
             "- Agent 自主循环：一次消息可能跨多轮（最多 "
             "`max_iterations` 轮，可在 `config.yaml` 配）\n"
@@ -546,6 +551,78 @@ class ChatScreen(Screen):
             f"  - cache_write: `{usage.cache_write_tokens}`",
             f"  - hit_rate: `{hit_rate}%`",
         ]
+        self._append_info("\n".join(lines))
+
+    async def _handle_mcp(self, args: str) -> None:
+        """`/mcp [subcommand]` — v0.6:查看 MCP server 状态 / 重连 / 帮助。
+
+        子命令:
+        - (空)        — 显示 server 状态表(name / status / tools / error)
+        - reconnect <name> — 重跑单 server 握手
+        - help       — 列出可用子命令
+        """
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        manager = getattr(app, "mcp_manager", None)
+
+        if args == "help":
+            self._append_info(
+                "**/mcp 子命令**\n\n"
+                "- `/mcp` — 显示所有 MCP server 状态\n"
+                "- `/mcp reconnect <name>` — 重连指定 server\n"
+                "- `/mcp help` — 本帮助"
+            )
+            return
+
+        if manager is None:
+            self._append_info(
+                "MCP 客户端未启动（app.mcp_manager 为 None）。"
+                "请确认 config.yaml 里有 `mcp_servers` 配置块。"
+            )
+            return
+
+        if args.startswith("reconnect "):
+            name = args[len("reconnect "):].strip()
+            if not name:
+                self._append_info("用法: /mcp reconnect <name>")
+                return
+            self._append_info(f"[mcp] reconnecting {name!r}...")
+            try:
+                state = await manager.reconnect(name)
+            except Exception as exc:  # noqa: BLE001
+                self._append_info(f"[mcp] reconnect {name!r} failed: {exc}")
+                return
+            if state.status == "connected":
+                tool_names = ", ".join(t.name for t in state.tools)
+                self._append_info(
+                    f"[mcp] {name!r}: {state.status} — "
+                    f"{len(state.tools)} tools [{tool_names}]"
+                )
+            else:
+                self._append_info(
+                    f"[mcp] {name!r}: {state.status} — {state.error}"
+                )
+            return
+
+        states = manager.states
+        if not states:
+            self._append_info("MCP: 未配置 server（config.yaml 里没有 mcp_servers 块）。")
+            return
+
+        lines = ["**MCP servers**\n"]
+        for name, state in states.items():
+            icon = {"connected": "●", "failed": "✗", "broken": "✗"}.get(
+                state.status, "?"
+            )
+            tool_list = ", ".join(t.name for t in state.tools) if state.tools else "—"
+            err = f" — {state.error}" if state.error else ""
+            lines.append(
+                f"- {icon} `{name}`: `{state.status}` · "
+                f"{len(state.tools)} tools [{tool_list}]{err}"
+            )
+        lines.append(
+            "\n输入 `/mcp reconnect <name>` 重连指定 server；"
+            "`/mcp help` 看更多子命令。"
+        )
         self._append_info("\n".join(lines))
 
     def _show_denial_for_retry(self, call: ToolCall) -> None:

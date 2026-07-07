@@ -13,6 +13,7 @@ from baozicode.config.schema import AppConfig, BackendName, BackendConfig
 from baozicode.conversation.manager import ConversationManager
 from baozicode.llm.base import LLMClient
 from baozicode.llm.factory import create_client
+from baozicode.mcp.manager import McpClientManager
 from baozicode.permissions import bootstrap as permissions_bootstrap
 from baozicode.permissions.engine import RuleEngine
 from baozicode.permissions.types import MergedPermissions, PermissionMode
@@ -30,6 +31,7 @@ class BaoZiCodeApp(App):
         config: AppConfig,
         *,
         project_root: Path | None = None,
+        mcp_manager: McpClientManager | None = None,
     ) -> None:
         super().__init__()
         self.config: AppConfig = config
@@ -54,8 +56,37 @@ class BaoZiCodeApp(App):
         # 已在跑的 Agent 不受影响(其 __init__ 时刻已捕获 mode)
         self.session_mode: PermissionMode | None = None
 
+        # ---- v0.6:MCP 客户端 ----
+        # 如果 caller(CLI)已 bootstrap,直接接过来;否则由 on_mount worker 异步 bootstrap
+        self.mcp_manager: McpClientManager | None = mcp_manager
+
     def on_mount(self) -> None:
         self.push_screen(ChatScreen())
+        if self.mcp_manager is None and self.config.mcp_servers:
+            self.run_worker(self._bootstrap_mcp(), exclusive=True, name="mcp-bootstrap")
+
+    async def _bootstrap_mcp(self) -> None:
+        """在后台跑 MCP bootstrap;失败降级,只 banner 提示。"""
+        from baozicode.mcp import bootstrap as mcp_bootstrap
+
+        try:
+            self.mcp_manager = await mcp_bootstrap(self.config)
+        except Exception as exc:  # noqa: BLE001
+            import logging
+
+            logging.getLogger("baozicode.app").warning(
+                "MCP bootstrap failed: %s: %s", type(exc).__name__, exc,
+            )
+            self.mcp_manager = None
+
+    async def on_unmount(self) -> None:
+        """App 关闭时清理 MCP 客户端(关闭所有 session,unregister 工具)。"""
+        if self.mcp_manager is not None:
+            try:
+                await self.mcp_manager.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+            self.mcp_manager = None
 
     def switch_backend(self, target: BackendName) -> None:
         """切换到 `target` 后端。已经是目标则 no-op。"""

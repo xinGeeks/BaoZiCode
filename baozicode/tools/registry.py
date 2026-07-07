@@ -1,11 +1,15 @@
-"""工具注册表 — 聚合 7 个工具,提供 lookup + 路由执行。
+"""工具注册表 — 聚合 7 个内置工具 + 运行时注册的 MCP 工具。
 
-固定顺序:Read, Write, Edit, Bash, Grep, Glob, WebFetch。
-这个顺序会传给 LLM,所以保持稳定(LLM 偏好习惯的工具顺序)。
+v0.6 改造:从模块级常量改成 `ToolRegistry` 类以支持运行时 MCP 工具注入。
+模块级 `_default = ToolRegistry()` 单例 + 顶层函数都委托给单例,
+现有 12 个调用点零修改。
+
+固定顺序:Read, Write, Edit, Bash, Grep, Glob, WebFetch(LLM 偏好习惯)。
 """
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 from typing import Awaitable, Callable
 
@@ -18,9 +22,6 @@ from baozicode.tools.read import TOOL as READ
 from baozicode.tools.webfetch import TOOL as WEBFETCH
 from baozicode.tools.write import TOOL as WRITE
 
-_TOOLS: list[ToolDefinition] = [READ, WRITE, EDIT, BASH, GREP, GLOB, WEBFETCH]
-_BY_NAME: dict[str, ToolDefinition] = {t.name: t for t in _TOOLS}
-
 Executor = Callable[[dict], Awaitable[ToolResult]]
 
 
@@ -29,7 +30,7 @@ def _load_executor(module_name: str) -> Executor:
     return mod.execute
 
 
-_EXECUTORS: dict[str, Executor] = {
+_BUILTIN_EXECUTORS: dict[str, Executor] = {
     "Read": _load_executor("baozicode.tools.read"),
     "Write": _load_executor("baozicode.tools.write"),
     "Edit": _load_executor("baozicode.tools.edit"),
@@ -39,19 +40,116 @@ _EXECUTORS: dict[str, Executor] = {
     "WebFetch": _load_executor("baozicode.tools.webfetch"),
 }
 
+_BUILTIN_TOOLS: list[ToolDefinition] = [
+    READ, WRITE, EDIT, BASH, GREP, GLOB, WEBFETCH,
+]
+
+
+class ToolRegistry:
+    """可变工具注册表 — 内置工具固定,MCP 工具可运行时注入。"""
+
+    def __init__(self) -> None:
+        self._builtin_tools: list[ToolDefinition] = list(_BUILTIN_TOOLS)
+        self._builtin_names: frozenset[str] = frozenset(t.name for t in _BUILTIN_TOOLS)
+        self._mcp_tools: dict[str, ToolDefinition] = {}
+        self._executors: dict[str, Executor] = dict(_BUILTIN_EXECUTORS)
+        self._lock = asyncio.Lock()
+
+    def get_all_tools(self) -> list[ToolDefinition]:
+        """返回所有工具(内置在前,固定顺序;MCP 在后)。"""
+        return list(self._builtin_tools) + list(self._mcp_tools.values())
+
+    def get_tool(self, name: str) -> ToolDefinition | None:
+        for t in self._builtin_tools:
+            if t.name == name:
+                return t
+        return self._mcp_tools.get(name)
+
+    def get_tool_names(self) -> list[str]:
+        return [t.name for t in self._builtin_tools] + list(self._mcp_tools.keys())
+
+    async def register_mcp_tool(
+        self,
+        tool: ToolDefinition,
+        executor: Executor,
+    ) -> None:
+        """注册一个 MCP 工具。
+
+        Args:
+            tool: 已适配的 ToolDefinition(名字已是 `mcp__<server>__<tool>` 形式)
+            executor: 实际调用的 async callable — 通常是 manager 的
+                `invoke_tool(name, arguments)` 闭包
+
+        Raises:
+            ValueError: 名字与内置工具冲突
+        """
+        async with self._lock:
+            if tool.name in self._builtin_names:
+                raise ValueError(
+                    f"MCP tool name {tool.name!r} collides with built-in tool; "
+                    f"this registration is rejected to avoid masking built-ins."
+                )
+            self._mcp_tools[tool.name] = tool
+            self._executors[tool.name] = executor
+
+    async def unregister_mcp_tools(self, names: list[str]) -> None:
+        """批量移除 MCP 工具(reconnect 时清旧工具用)。"""
+        async with self._lock:
+            for n in names:
+                self._mcp_tools.pop(n, None)
+                self._executors.pop(n, None)
+
+    def mcp_tool_names(self) -> list[str]:
+        return list(self._mcp_tools.keys())
+
+    async def execute_tool_call(self, call: ToolCall) -> ToolResult:
+        """路由到具体工具的 execute(arguments),并把 tool_call_id 附到 result。
+
+        找不到工具时返回 error_result,带可用工具列表。
+        """
+        if call.error:
+            return ToolResult.error_result(
+                call.id,
+                f"tool arguments JSON parse error: {call.error}",
+            )
+        executor = self._executors.get(call.name)
+        if executor is None:
+            return ToolResult.error_result(
+                call.id,
+                f"unknown tool: {call.name!r}. Available: {self.get_tool_names()}",
+            )
+        result = await executor(call.arguments)
+        if result.tool_call_id == "":
+            result.tool_call_id = call.id
+        return result
+
+
+# 模块级单例 — 现有调用点零修改
+_default = ToolRegistry()
+
 
 def get_all_tools() -> list[ToolDefinition]:
-    """返回 7 个 ToolDefinition(固定顺序)。"""
-    return list(_TOOLS)
+    return _default.get_all_tools()
 
 
 def get_tool(name: str) -> ToolDefinition | None:
-    """按名查找 ToolDefinition;找不到返回 None。"""
-    return _BY_NAME.get(name)
+    return _default.get_tool(name)
 
 
 def get_tool_names() -> list[str]:
-    return list(_BY_NAME.keys())
+    return _default.get_tool_names()
+
+
+async def register_mcp_tool(tool: ToolDefinition, executor: Executor) -> None:
+    await _default.register_mcp_tool(tool, executor)
+
+
+async def unregister_mcp_tools(names: list[str]) -> None:
+    await _default.unregister_mcp_tools(names)
+
+
+def mcp_tool_names() -> list[str]:
+    return _default.mcp_tool_names()
 
 
 async def execute_tool(
@@ -61,12 +159,11 @@ async def execute_tool(
     tool_call_id: str = "",
 ) -> ToolResult:
     """路由到具体工具的 execute(arguments),并把 tool_call_id 附到 result。"""
-    executor = _EXECUTORS.get(name)
+    executor = _default._executors.get(name)  # noqa: SLF001 — 内部访问保持兼容
     if executor is None:
         return ToolResult.error_result(
-            tool_call_id, f"unknown tool: {name!r}. Available: {get_tool_names()}"
+            tool_call_id, f"unknown tool: {name!r}. Available: {_default.get_tool_names()}"
         )
-
     result = await executor(arguments)
     if result.tool_call_id == "":
         result.tool_call_id = tool_call_id
@@ -75,18 +172,17 @@ async def execute_tool(
 
 async def execute_tool_call(call: ToolCall) -> ToolResult:
     """便利方法:从 ToolCall 直接执行(arguments 解析失败时返回 error_result)。"""
-    if call.error:
-        return ToolResult.error_result(
-            call.id,
-            f"tool arguments JSON parse error: {call.error}",
-        )
-    return await execute_tool(call.name, call.arguments, tool_call_id=call.id)
+    return await _default.execute_tool_call(call)
 
 
 __all__ = [
+    "ToolRegistry",
     "execute_tool",
     "execute_tool_call",
     "get_all_tools",
     "get_tool",
     "get_tool_names",
+    "mcp_tool_names",
+    "register_mcp_tool",
+    "unregister_mcp_tools",
 ]

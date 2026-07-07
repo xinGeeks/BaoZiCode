@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
+
+__all__ = [
+    "AgentConfig",
+    "AppConfig",
+    "BackendConfig",
+    "BackendName",
+    "McpServerConfig",
+    "McpServerHttpConfig",
+    "McpServerStdioConfig",
+    "PermissionRuleYaml",
+    "Permissions",
+    "PermissionsV5",
+    "RulesConfig",
+]
 
 BackendName = Literal["anthropic", "openai", "minimax", "deepseek"]
 
@@ -110,6 +124,46 @@ class PermissionsV5(BaseModel):
     rules: list[PermissionRuleYaml] = Field(default_factory=list)
 
 
+# v0.6: MCP server 配置。
+# 用 Pydantic discriminated union 区分 stdio / http 两种 transport,
+# 公共字段(超时)放在每个 variant 上而非公共基类,避免跨 transport 的语义混乱。
+
+class McpServerStdioConfig(BaseModel):
+    """stdio 传输的 MCP server 配置 — 启动子进程,stdin/stdout 走 JSON-RPC。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["stdio"] = "stdio"
+    command: str
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str | None = None
+    init_timeout_s: float = 5.0
+    tools_list_timeout_s: float = 8.0
+    startup_total_timeout_s: float = 15.0
+    call_timeout_s: float = 60.0
+
+
+class McpServerHttpConfig(BaseModel):
+    """Streamable HTTP 传输的 MCP server 配置 — POST 到 URL,SSE 接收 server-initiated 消息。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["http"] = "http"
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    init_timeout_s: float = 5.0
+    tools_list_timeout_s: float = 8.0
+    startup_total_timeout_s: float = 15.0
+    call_timeout_s: float = 60.0
+
+
+McpServerConfig = Annotated[
+    Union[McpServerStdioConfig, McpServerHttpConfig],
+    Field(discriminator="type"),
+]
+
+
 class AppConfig(BaseModel):
     """BaoZiCode 全局配置。
 
@@ -123,6 +177,9 @@ class AppConfig(BaseModel):
 
     v0.5 新增字段:
     - `permissions_v5` 新版三层 YAML 规则(可选;为空时走 v0.2 旧 Permissions)
+
+    v0.6 新增字段:
+    - `mcp_servers` MCP 外部 server 列表(可选;为空时跳过 MCP bootstrap)
     """
 
     backend: BackendName
@@ -137,6 +194,7 @@ class AppConfig(BaseModel):
     permissions: Permissions | None = None
     permissions_v5: PermissionsV5 | None = None
     agent: AgentConfig | None = None
+    mcp_servers: dict[str, McpServerConfig] = Field(default_factory=dict)
 
     def active(self) -> BackendConfig:
         """返回当前激活后端的配置。"""
@@ -165,6 +223,9 @@ __all__ = [
     "AppConfig",
     "BackendConfig",
     "BackendName",
+    "McpServerConfig",
+    "McpServerHttpConfig",
+    "McpServerStdioConfig",
     "PermissionRuleYaml",
     "Permissions",
     "PermissionsV5",

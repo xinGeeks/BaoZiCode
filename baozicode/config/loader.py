@@ -158,6 +158,69 @@ def _discover_permissions_yaml(config_path: Path) -> PermissionsV5 | None:
     )
 
 
+def _merge_mcp_servers_layered(path: Path) -> dict[str, Any]:
+    """v0.6:对 `mcp_servers` 做两层 merge(project + user,project 优先)。
+
+    返回 raw 字典(含 `${VAR}` 占位符,调用方再走 _substitute_env)。
+    仅合并 `mcp_servers` 顶层键;其它键不动 — 整份 config 的两层合并
+    在更高层做。
+
+    实现:
+    1. 读主 config(已 resolve)取 `mcp_servers`
+    2. 读 ~/.config/baozicode/config.yaml 取 `mcp_servers`(若存在)
+    3. 两层 dict 合并:同 key 时 main(项目级)覆盖 user(用户级)
+    4. 若同 server 在两层都声明且 `type` 不同,log warning(项目级胜)
+    """
+    main_data: dict[str, Any] = {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        loaded = yaml.safe_load(raw)
+        if isinstance(loaded, dict):
+            main_data = loaded
+    except (OSError, yaml.YAMLError) as exc:
+        log.warning("config: %s 读取失败,跳过主 mcp_servers: %s", path, exc)
+
+    user_path = Path.home() / ".config" / "baozicode" / "config.yaml"
+    user_mcp: dict[str, Any] = {}
+    if user_path.is_file() and user_path.resolve() != path.resolve():
+        try:
+            raw_user = user_path.read_text(encoding="utf-8")
+            loaded_user = yaml.safe_load(raw_user)
+            if isinstance(loaded_user, dict):
+                user_section = loaded_user.get("mcp_servers")
+                if isinstance(user_section, dict):
+                    user_mcp = user_section
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning("config: %s 读取失败,跳过用户级 mcp_servers: %s", user_path, exc)
+
+    main_section = main_data.get("mcp_servers")
+    if not isinstance(main_section, dict):
+        main_section = {}
+
+    if not user_mcp and not main_section:
+        return {}
+
+    merged: dict[str, Any] = dict(user_mcp)
+    for name, main_cfg in main_section.items():
+        if name in merged:
+            user_type = merged[name].get("type") if isinstance(merged[name], dict) else None
+            main_type = main_cfg.get("type") if isinstance(main_cfg, dict) else None
+            if user_type and main_type and user_type != main_type:
+                log.warning(
+                    "config: mcp_servers.%s 在用户级(type=%s)和项目级(type=%s)"
+                    "声明了不同的 transport,以项目级为准",
+                    name, user_type, main_type,
+                )
+        merged[name] = main_cfg
+
+    if user_mcp:
+        log.info(
+            "config: mcp_servers 两层合并完成 — 用户级 %d 条,项目级 %d 条,合并后 %d 条",
+            len(user_mcp), len(main_section), len(merged),
+        )
+    return merged
+
+
 def load_config(explicit_path: str | None = None) -> AppConfig:
     """加载并校验配置。"""
     load_dotenv()
@@ -167,6 +230,14 @@ def load_config(explicit_path: str | None = None) -> AppConfig:
     data = yaml.safe_load(raw)
     if not isinstance(data, dict):
         raise ConfigError(f"配置文件 {path} 内容不是合法的 YAML 对象。")
+
+    # v0.6:在 `_substitute_env` 之前先做 mcp_servers 两层 merge,
+    # 这样 `${VAR}` 替换对合并后的 command/args/env/url/headers 都生效。
+    merged_mcp = _merge_mcp_servers_layered(path)
+    if merged_mcp:
+        data = dict(data)
+        data["mcp_servers"] = merged_mcp
+
     substituted = _substitute_env(data)
     config = AppConfig.model_validate(substituted)
 
