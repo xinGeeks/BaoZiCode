@@ -1,4 +1,10 @@
-"""三层 stop guards 的纯函数测试 — 不依赖 LLM/工具,直接喂 GuardState。"""
+"""三层 stop guards 的纯函数测试 — 不依赖 LLM/工具,直接喂 GuardState。
+
+v0.5 变化:
+- `check_deny_threshold` 退化为 no-op(D7:deny 不再终止 Agent Loop)
+- `record_denial` 改为 `record_denial_warn`,语义不变
+- 新 `should_inject_denial_reminder(tool_name, state, threshold)` 替代终止检查
+"""
 
 import sys
 from pathlib import Path
@@ -13,6 +19,8 @@ from baozicode.agent.guards import (
     check_unknown_tool,
     error_signature,
     record_denial,
+    record_denial_warn,
+    should_inject_denial_reminder,
 )
 from baozicode.tools.base import ToolCall
 
@@ -60,46 +68,80 @@ def test_check_unknown_tool_two_different_names_both_pass() -> None:
     print("[OK] 2 different unknown tools: no hallucination yet")
 
 
-def test_record_denial_increments_count() -> None:
+def test_record_denial_warn_increments_count() -> None:
+    """v0.5 新名 `record_denial_warn`,语义同 v0.4 `record_denial`。"""
     state = GuardState()
-    record_denial(state, "Bash")
-    record_denial(state, "Bash")
-    record_denial(state, "Edit")
+    record_denial_warn(state, "Bash")
+    record_denial_warn(state, "Bash")
+    record_denial_warn(state, "Edit")
     assert state.deny_counts == {"Bash": 2, "Edit": 1}
-    print("[OK] record_denial: increments per-name")
+    print("[OK] record_denial_warn: increments per-name")
 
 
-def test_check_deny_threshold_triggers_at_three() -> None:
-    """同一工具名累计 3 次拒绝 → 终止。"""
-    state = GuardState()
-    for _ in range(3):
-        record_denial(state, "Bash")
-    reason = check_deny_threshold(_call("Bash"), state)
-    assert reason == StopReason.DENIALS_EXCEEDED
-    print("[OK] deny threshold triggers at 3 cumulative denials")
-
-
-def test_check_deny_threshold_below_threshold_does_not_trigger() -> None:
+def test_record_denial_alias_works() -> None:
+    """v0.4 兼容:`record_denial` 仍然可用,内部转调 `record_denial_warn`。"""
     state = GuardState()
     record_denial(state, "Bash")
     record_denial(state, "Bash")
-    reason = check_deny_threshold(_call("Bash"), state)
-    assert reason is None
-    print("[OK] 2 denials is below threshold")
+    assert state.deny_counts == {"Bash": 2}
+    print("[OK] record_denial: v0.4 alias still works")
 
 
-def test_check_deny_threshold_separates_tools() -> None:
-    """不同工具的拒绝计数独立:不会因别名攒够触发对方。"""
+def test_check_deny_threshold_is_noop_in_v5() -> None:
+    """v0.5:`check_deny_threshold` 永远返回 None(deny 不再终止)。"""
     state = GuardState()
-    record_denial(state, "Bash")
-    record_denial(state, "Bash")
-    record_denial(state, "Edit")
-    record_denial(state, "Edit")
-    record_denial(state, "Edit")
-    # Bash 只有 2 次,不触发;Edit 3 次,触发
+    for _ in range(10):
+        record_denial_warn(state, "Bash")
+    # 即使 10 次拒绝,也不返回终止 reason
     assert check_deny_threshold(_call("Bash"), state) is None
-    assert check_deny_threshold(_call("Edit"), state) == StopReason.DENIALS_EXCEEDED
-    print("[OK] deny counts scoped per tool name")
+    print("[OK] check_deny_threshold: no-op in v0.5 (deny no longer terminates)")
+
+
+def test_should_inject_denial_reminder_below_threshold() -> None:
+    state = GuardState()
+    for _ in range(4):
+        record_denial_warn(state, "Bash")
+    assert should_inject_denial_reminder("Bash", state, threshold=5) is False
+    print("[OK] should_inject_denial_reminder: 4 < 5 → False")
+
+
+def test_should_inject_denial_reminder_at_threshold() -> None:
+    state = GuardState()
+    for _ in range(5):
+        record_denial_warn(state, "Bash")
+    assert should_inject_denial_reminder("Bash", state, threshold=5) is True
+    print("[OK] should_inject_denial_reminder: 5 ≥ 5 → True")
+
+
+def test_should_inject_denial_reminder_above_threshold() -> None:
+    state = GuardState()
+    for _ in range(10):
+        record_denial_warn(state, "Bash")
+    assert should_inject_denial_reminder("Bash", state, threshold=5) is True
+    print("[OK] should_inject_denial_reminder: 10 ≥ 5 → True")
+
+
+def test_should_inject_denial_reminder_per_tool() -> None:
+    """不同工具的拒绝计数独立。"""
+    state = GuardState()
+    for _ in range(5):
+        record_denial_warn(state, "Bash")
+    # Edit 只有 0 次 → False
+    assert should_inject_denial_reminder("Edit", state, threshold=5) is False
+    # Bash 5 次 → True
+    assert should_inject_denial_reminder("Bash", state, threshold=5) is True
+    print("[OK] should_inject_denial_reminder: per-tool counts independent")
+
+
+def test_should_inject_denial_reminder_custom_threshold() -> None:
+    """threshold 可由调用方传入(默认 5)。"""
+    state = GuardState()
+    record_denial_warn(state, "Bash")
+    # threshold=1,1 次就够
+    assert should_inject_denial_reminder("Bash", state, threshold=1) is True
+    # threshold=2,1 次不够
+    assert should_inject_denial_reminder("Bash", state, threshold=2) is False
+    print("[OK] should_inject_denial_reminder: custom threshold respected")
 
 
 def test_check_failed_loop_signature_groups_distinct_messages() -> None:
@@ -141,10 +183,14 @@ if __name__ == "__main__":
     test_check_unknown_tool_passes_for_known_name()
     test_check_unknown_tool_hallucinates_twice_same_name()
     test_check_unknown_tool_two_different_names_both_pass()
-    test_record_denial_increments_count()
-    test_check_deny_threshold_triggers_at_three()
-    test_check_deny_threshold_below_threshold_does_not_trigger()
-    test_check_deny_threshold_separates_tools()
+    test_record_denial_warn_increments_count()
+    test_record_denial_alias_works()
+    test_check_deny_threshold_is_noop_in_v5()
+    test_should_inject_denial_reminder_below_threshold()
+    test_should_inject_denial_reminder_at_threshold()
+    test_should_inject_denial_reminder_above_threshold()
+    test_should_inject_denial_reminder_per_tool()
+    test_should_inject_denial_reminder_custom_threshold()
     test_check_failed_loop_signature_groups_distinct_messages()
     test_check_failed_loop_window_evicts_old_failures()
     print("\nAll guards tests passed.")
