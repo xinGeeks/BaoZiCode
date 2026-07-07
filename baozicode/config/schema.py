@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,8 +41,27 @@ class Permissions(BaseModel):
 _DEFAULT_PERMISSIONS = Permissions()
 
 
+class RulesConfig(BaseModel):
+    """v0.4 — 7 条关键规则的开关。
+
+    每条规则都同时出现在 system prompt 的「工具使用关键规则」section
+    和相关工具的 description 开头(`RuleRegistry.augment_tool`)。
+    把任一字段设为 False,规则既不会出现在 prompt 里,也不会注入工具描述。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    edit_requires_read: bool = True
+    prefer_specialized_tools: bool = True
+    bash_timeout: bool = True
+    parallel_limit: bool = True
+    error_then_decide: bool = True
+    absolute_paths: bool = True
+    webfetch_to_file: bool = True
+
+
 class AgentConfig(BaseModel):
-    """v0.3 引入 — Agent 主循环参数。
+    """v0.3 引入 — Agent 主循环参数 + v0.4 规则与提醒节奏。
 
     `max_iterations` 是安全网,Agent 跑到这个迭代次数还没结束就强制终止
     (`done.reason=MAX_ITERATIONS_REACHED`)。默认 20 足以应对绝大多数任务,
@@ -51,6 +71,9 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     max_iterations: int = 20
+    enable_system_reminders: bool = True
+    plan_reminder_interval: int = 5
+    rules: RulesConfig = Field(default_factory=RulesConfig)
 
 
 class AppConfig(BaseModel):
@@ -58,10 +81,18 @@ class AppConfig(BaseModel):
 
     四个后端的 `BackendConfig` 块全部必填——这样切换后端时只需改一个字段
     （`backend:`），不需要再去配另一块；Pydantic 校验也会立刻指出缺什么。
+
+    v0.4 新增字段:
+    - `custom_instructions` 用户追加的额外说明(喂给 PromptBuilder 的 custom section)
+    - `skills_dir` skills 文件目录(扫不到时静默跳过)
+    - `memory_path` 长效记忆文件(不存在时静默跳过)
     """
 
     backend: BackendName
     system_prompt: str = "You are BaoZiCode, a helpful AI coding assistant."
+    custom_instructions: str = ""
+    skills_dir: Path = Field(default_factory=lambda: Path("~/.config/baozicode/skills").expanduser())
+    memory_path: Path = Field(default_factory=lambda: Path("~/.config/baozicode/memory.md").expanduser())
     anthropic: BackendConfig
     openai: BackendConfig
     minimax: BackendConfig
@@ -97,4 +128,5 @@ __all__ = [
     "BackendConfig",
     "BackendName",
     "Permissions",
+    "RulesConfig",
 ]

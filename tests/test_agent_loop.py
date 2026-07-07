@@ -3,7 +3,7 @@
 import asyncio
 import sys
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -14,6 +14,9 @@ from baozicode.conversation.manager import ConversationManager
 from baozicode.llm.base import ContentDelta, LLMClient, Message
 from baozicode.tools.base import ToolCall, ToolResult
 from baozicode.tools.registry import get_all_tools
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _agent_helpers import make_minimal_config
 
 
 class _ScriptedLLM(LLMClient):
@@ -71,7 +74,13 @@ async def test_text_only_response_completes() -> None:
     llm = _ScriptedLLM([
         [ContentDelta(type="text", text="hello there")]
     ])
-    a = Agent(llm_client=llm, tools=get_all_tools(), conversation=conv, permissions=_Perm())
+    a = Agent(
+        llm_client=llm,
+        tools=get_all_tools(),
+        conversation=conv,
+        permissions=_Perm(),
+        config=make_minimal_config(),
+    )
     events = await _drain(a, "hi")
     reasons = [e.payload for e in events if e.type == "done"]
     assert reasons == [StopReason.COMPLETED]
@@ -105,6 +114,7 @@ async def test_text_plus_one_tool_call_eventually_completes() -> None:
         tools=get_all_tools(),
         conversation=conv,
         permissions=_Perm(auto_allow=["Read"]),  # auto_allow Read 跳过 Modal
+        config=make_minimal_config(),
     )
     events = await _drain(a, "find x")
     types = [e.type for e in events]
@@ -143,6 +153,7 @@ async def test_max_iterations_reached() -> None:
         conversation=conv,
         permissions=_Perm(auto_allow=["Read"]),
         max_iterations=3,
+        config=make_minimal_config(),
     )
     events = await _drain(a, "loop")
     reasons = [e.payload for e in events if e.type == "done"]
@@ -167,7 +178,13 @@ async def test_user_cancellation_via_event() -> None:
             # usage 不会到达因为循环会在 stream 末尾检查
 
     llm = LongStreamLLM()
-    a = Agent(llm_client=llm, tools=get_all_tools(), conversation=conv, permissions=_Perm())
+    a = Agent(
+        llm_client=llm,
+        tools=get_all_tools(),
+        conversation=conv,
+        permissions=_Perm(),
+        config=make_minimal_config(),
+    )
 
     async def driver():
         # 起一个 cancel 在 30ms 后
@@ -191,7 +208,13 @@ async def test_stream_error_caught() -> None:
     """LLM 流抛异常 → Agent 捕获 → done.reason=STREAM_ERROR,error 事件先 yield。"""
     conv = ConversationManager()
     llm = _ScriptedLLM([[]], fail_on_call=1)  # 第 1 次调用就抛
-    a = Agent(llm_client=llm, tools=get_all_tools(), conversation=conv, permissions=_Perm())
+    a = Agent(
+        llm_client=llm,
+        tools=get_all_tools(),
+        conversation=conv,
+        permissions=_Perm(),
+        config=make_minimal_config(),
+    )
     events = await _drain(a, "kaboom")
     error_events = [e.payload for e in events if e.type == "error"]
     done_reasons = [e.payload for e in events if e.type == "done"]
@@ -213,7 +236,7 @@ async def test_deny_short_circuits_executor() -> None:
         tools=get_all_tools(),
         conversation=conv,
         permissions=_Perm(deny=["Bash"]),
-        system_prompt="test",
+        config=make_minimal_config(),
     )
     events = await _drain(a, "shell")
     tool_results = [e.payload for e in events if e.type == "tool_result"]
@@ -246,6 +269,7 @@ async def test_auto_allow_skips_permission_callback() -> None:
         conversation=conv,
         permissions=_Perm(auto_allow=["Read"]),
         permission_callback=cb,
+        config=make_minimal_config(),
     )
     events = await _drain(a, "r")
     assert calls_to_callback == [], f"callback fired: {calls_to_callback}"
@@ -272,6 +296,7 @@ async def test_permission_callback_invoked_for_non_auto_tool() -> None:
         conversation=conv,
         permissions=_Perm(),  # Bash 不在 auto_allow
         permission_callback=deny_all,
+        config=make_minimal_config(),
     )
     events = await _drain(a, "shell")
     tool_results = [e.payload for e in events if e.type == "tool_result"]
@@ -281,8 +306,11 @@ async def test_permission_callback_invoked_for_non_auto_tool() -> None:
     print("[OK] permission_callback=False → is_error result")
 
 
-async def test_system_prompt_passed_to_llm_stream() -> None:
-    """Agent(system_prompt=...) 应把它原样传给 llm.stream 的 system 参数。"""
+async def test_stable_system_passed_to_llm_stream() -> None:
+    """v0.4: Agent 应该把 self._prompt.stable_system(由 PromptBuilder 拼)传入 llm.stream。
+
+    不再断言具体文本(那会被 PromptBuilder 改动破坏),只断言含"BaoZiCode"。
+    """
     conv = ConversationManager()
 
     class RecordingLLM(LLMClient):
@@ -299,11 +327,12 @@ async def test_system_prompt_passed_to_llm_stream() -> None:
         tools=get_all_tools(),
         conversation=conv,
         permissions=_Perm(),
-        system_prompt="I am BaoZiCode v0.3",
+        config=make_minimal_config(),
     )
     await _drain(a, "x")
-    assert rec.last_system == "I am BaoZiCode v0.3"
-    print("[OK] system_prompt flows into llm.stream system kwarg")
+    assert rec.last_system is not None
+    assert "BaoZiCode" in rec.last_system
+    print("[OK] stable_system from BuiltPrompt flows into llm.stream system kwarg")
 
 
 async def test_session_usage_accumulates_across_turns() -> None:
@@ -326,6 +355,7 @@ async def test_session_usage_accumulates_across_turns() -> None:
         tools=get_all_tools(),
         conversation=conv,
         permissions=_Perm(auto_allow=["Read"]),
+        config=make_minimal_config(),
     )
     events = await _drain(a, "anything")
     usages = [e.payload for e in events if e.type == "usage"]
@@ -347,7 +377,7 @@ async def main() -> None:
     await test_deny_short_circuits_executor()
     await test_auto_allow_skips_permission_callback()
     await test_permission_callback_invoked_for_non_auto_tool()
-    await test_system_prompt_passed_to_llm_stream()
+    await test_stable_system_passed_to_llm_stream()
     await test_session_usage_accumulates_across_turns()
     print("\nAll agent_loop tests passed.")
 

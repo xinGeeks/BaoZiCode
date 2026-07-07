@@ -5,8 +5,24 @@
 backend: anthropic
 # v0.3 当前版本
 
-# 全局系统提示（每个 backend 共用）
+# 全局系统提示（每个 backend 共用，v0.3 沿用；v0.4 由 PromptBuilder 拼装 11 个 sections）
 system_prompt: "You are BaoZiCode, a helpful AI coding assistant."
+
+# v0.4 用户追加指令 — 喂给 PromptBuilder 的 custom section,默认空
+# 多行示例(用 | 或 > 都行):
+# custom_instructions: |
+#   始终用中文回复。
+#   改完代码记得跑 pytest 确认没有回归。
+#
+# custom_instructions: ""
+
+# v0.4 skills 目录 — PromptBuilder 启动时扫描本目录,把每个 SKILL.md 注入 system prompt
+# 目录不存在/为空时静默跳过,不报错
+# skills_dir: ~/.config/baozicode/skills
+
+# v0.4 长效记忆文件 — 类似 AGENTS.md,PromptBuilder 启动时整个文件读入 system prompt
+# 文件不存在时静默跳过,不报错
+# memory_path: ~/.config/baozicode/memory.md
 
 # 注意：四个后端的配置块全部必填。
 # 即使当前用 anthropic，也要填好 minimax / deepseek 两块（key 和 model）。
@@ -62,12 +78,36 @@ deepseek:
 #   batch_confirm: true
 #   bash_locked_cwd: false
 
-# Agent 主循环配置（v0.3 新增；整个块可省略，省略时全用默认）
+# Agent 主循环配置（v0.3 新增，v0.4 扩展；整个块可省略，省略时全用默认）
 #
 # max_iterations：Agent 单次 run 的最大迭代轮次（兜底安全网）
 #   默认 20 —— 足以应对绝大多数多步任务，又能在 LLM 进入死循环时及时阻断
 #   常见场景：Read 多文件 + Edit 多处 = 5-10 轮；批量重构 = 10-15 轮
 #   调到 50 用于长任务（如迁移整个模块），调到 10 用于受限场景
 #
+# enable_system_reminders：v0.4 — 是否在每轮 LLM 调用前注入 <system-reminder> 块
+#   默认 true。设为 false 可以完全关闭 env / plan_mode 提醒注入，便于调试。
+#
+# plan_reminder_interval：v0.4 — plan mode 提醒的复读周期（按迭代轮次计）
+#   默认 5 — 在第 1、6、11、16 ... 轮重发 plan_mode 提醒
+#   改小（比如 3）让 agent 在长任务里更频繁地收到提醒；改大减少噪音
+#
+# rules：v0.4 — 7 条关键规则的总开关。任一字段设为 false 时,
+#   - 该规则不会出现在 system prompt 的「工具使用关键规则」section
+#   - 也不会注入相关工具的 description 前缀
+#   适合某条规则不适用于当前项目场景时单独关掉。
+#
 # agent:
 #   max_iterations: 20
+#   enable_system_reminders: true
+#   plan_reminder_interval: 5
+#   rules:
+#     edit_requires_read: true           # Edit/Write 前必先 Read
+#     prefer_specialized_tools: true     # 优先 Read/Grep/Glob 而非 Bash 模拟
+#     bash_timeout: true                 # Bash 必传 timeout 参数
+#     parallel_limit: true               # 单次并行无副作用工具不超过 4 个
+#     error_then_decide: true            # is_error 后先分析再行动
+#     absolute_paths: true               # 所有路径必为绝对路径
+#     webfetch_to_file: true             # WebFetch 大内容落临时文件再用 Read
+#     # 例:关掉 webfetch_to_file,因为本项目不联网
+#     # webfetch_to_file: false

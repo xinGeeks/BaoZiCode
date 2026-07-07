@@ -95,6 +95,19 @@ class PromptBuilder:
             now_iso=datetime.now().strftime("%Y-%m-%d %H:%M:%S (%a)"),
         )
 
+    def _filter_registry(self, config: object) -> RuleRegistry:
+        """根据 config.active_agent().rules 返回只含 enabled rule 的 RuleRegistry。
+
+        spec: rule 字段为 False 时,该 rule 既不出现在 system prompt section,
+        也不注入任何 tool description 前缀。所以两层(filtered)统一从源头过滤。
+        """
+        try:
+            rules_cfg = config.active_agent().rules  # type: ignore[attr-defined]
+        except Exception:
+            return self._rules
+        filtered = tuple(r for r in self._rules.rules if getattr(rules_cfg, r.id, True))
+        return RuleRegistry(filtered)
+
     def build(
         self,
         config: object,
@@ -102,7 +115,11 @@ class PromptBuilder:
         tools: list[ToolDefinition],
         cwd: str | None = None,
     ) -> BuiltPrompt:
+        # 按 config.active_agent().rules 过滤出本次使用的 rule 集
+        effective_rules = self._filter_registry(config)
         ctx = self._make_context(config, plan_mode, cwd)
+        # BuildContext.frozen? 不是 — 用 replace 简单替换 rule_registry
+        ctx = BuildContext(**{**ctx.__dict__, "rule_registry": effective_rules})
 
         # 1. 拼 7 个固定 sections
         fixed_blocks = [fn.render(ctx) for fn in _FIXED_SECTIONS]
@@ -111,8 +128,9 @@ class PromptBuilder:
         # 3. 用 \n\n 串联
         stable = "\n\n".join(fixed_blocks + optional_blocks)
 
-        # 4. 增强工具描述
-        augmented = [self._rules.augment_tool(t) for t in tools]
+        # 4. 增强工具描述(plan_mode 时只保留 side_effect=False 的只读工具)
+        source_tools = tools if not plan_mode else [t for t in tools if not t.side_effect]
+        augmented = [effective_rules.augment_tool(t) for t in source_tools]
 
         # 5. env_info 走 user-role 消息
         env_msg = _build_env_message(ctx)

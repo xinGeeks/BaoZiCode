@@ -15,6 +15,9 @@ from baozicode.llm.base import ContentDelta, LLMClient, Message, TextBlock, Tool
 from baozicode.tools.base import ToolDefinition, ToolCall
 from baozicode.tools.registry import get_all_tools
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _agent_helpers import make_minimal_config
+
 
 class _Perm:
     """满足 Agent 期望的 duck-typed Permissions(minimal surface)。"""
@@ -40,11 +43,12 @@ def test_plan_mode_filters_side_effect_tools() -> None:
         tools=tools,
         conversation=ConversationManager(),
         permissions=_Perm(),
+        config=make_minimal_config(),
         plan_mode=True,
     )
-    names = [t.name for t in a.available_tools]
+    names = sorted(t.name for t in a.available_tools)
     # 4 只读工具:Read, Grep, Glob, WebFetch
-    assert names == ["Read", "Grep", "Glob", "WebFetch"]
+    assert names == ["Glob", "Grep", "Read", "WebFetch"]
     print("[OK] plan_mode=True: only side_effect=False tools exposed")
 
 
@@ -56,10 +60,11 @@ def test_plan_mode_false_exposes_all_tools() -> None:
         tools=tools,
         conversation=ConversationManager(),
         permissions=_Perm(),
+        config=make_minimal_config(),
         plan_mode=False,
     )
-    names = [t.name for t in a.available_tools]
-    assert names == ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch"]
+    names = sorted(t.name for t in a.available_tools)
+    assert names == ["Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "Write"]
     print("[OK] plan_mode=False: all 7 tools exposed")
 
 
@@ -69,6 +74,7 @@ def test_plan_mode_property_reflects_constructor() -> None:
         tools=get_all_tools(),
         conversation=ConversationManager(),
         permissions=_Perm(),
+        config=make_minimal_config(),
         plan_mode=True,
     )
     assert a.plan_mode is True
@@ -78,8 +84,22 @@ def test_plan_mode_property_reflects_constructor() -> None:
 def test_plan_mode_hides_side_effect_tool_at_constructor_layer() -> None:
     """即使用户传全工具进去,plan_mode=True 时仍然过滤 side_effect=True 的工具。"""
     tools = get_all_tools()
-    full = Agent(_NoopLLM(), tools, ConversationManager(), _Perm(), plan_mode=False)
-    plan = Agent(_NoopLLM(), tools, ConversationManager(), _Perm(), plan_mode=True)
+    full = Agent(
+        _NoopLLM(),
+        tools,
+        ConversationManager(),
+        _Perm(),
+        config=make_minimal_config(),
+        plan_mode=False,
+    )
+    plan = Agent(
+        _NoopLLM(),
+        tools,
+        ConversationManager(),
+        _Perm(),
+        config=make_minimal_config(),
+        plan_mode=True,
+    )
     full_names = {t.name for t in full.available_tools}
     plan_names = {t.name for t in plan.available_tools}
     diff = full_names - plan_names
@@ -127,6 +147,7 @@ async def test_agent_in_plan_mode_terminates_on_trying_side_effect_tool() -> Non
         tools=get_all_tools(),
         conversation=conv,
         permissions=_Perm(),
+        config=make_minimal_config(),
         plan_mode=True,
     )
     events = []

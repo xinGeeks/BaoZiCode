@@ -36,6 +36,7 @@ def _make_agent(perms: Permissions) -> Agent:
         tools=[],
         conversation=ConversationManager(),
         permissions=perms,
+        config=_cfg(perms),
     )
 
 
