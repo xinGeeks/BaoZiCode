@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-0.3.0-blue)
+![version](https://img.shields.io/badge/version-0.4.0-blue)
 
 ## 是什么
 
@@ -19,21 +19,35 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
 - 🧰 **7 个工具** — Read / Write / Edit / Bash / Grep / Glob / WebFetch,side_effect 标记驱动并发调度
 - 🔒 **权限控制** — auto_allow / deny / batch_confirm + `/auto` 本会话跳过所有 Modal
 - 📋 **Plan Mode（v0.3）** — `/plan <task>` 先读后规划,`/do` 再切全工具执行
+- 🧱 **模块化 system prompt（v0.4 新增）** — 11 段拼装,稳定指令走 LLM 缓存通道,
+  动态指令通过 `<system-reminder>` 注入,7 条规则可独立开关
 
-## 当前版本：v0.3
+## 当前版本：v0.4
 
 - ✅ 7 个工具 + `side_effect` 标记(`Plan B` 并发调度 + `Plan C` 扩展点)
 - ✅ **Agent Loop** — 7 种 `AgentEvent`(text / tool_call / tool_result / usage / progress / done / error)
 - ✅ **StreamCollector** — 双路收集:TUI 实时收 text,Agent 决策看 TurnSnapshot 完整源
 - ✅ **三层 stop guards** — unknown_tool / deny_threshold / failed_loop
 - ✅ **Plan Mode** — `/plan` 只开放 4 个只读工具,`/do` 切回全工具
-- ✅ **5 停止条件** — COMPLETED / MAX_ITERATIONS_REACHED / USER_CANCELLED /
+- ✅ **7 停止条件** — COMPLETED / MAX_ITERATIONS_REACHED / USER_CANCELLED /
   UNKNOWN_TOOL_HALLUCINATION / DENIALS_EXCEEDED / FAILED_TOOL_LOOP / STREAM_ERROR
 - ✅ **Token 用量追踪** — per-turn + session total,Anthropic 走 `message_delta.usage`,
   OpenAI 走 `stream_options.include_usage`
+- ✅ **模块化 system prompt（v0.4 新增）** — `baozicode/prompt/PromptBuilder.build()`
+  一次构建得 `BuiltPrompt{stable_system, dynamic_messages, augmented_tools, cache_breakpoints}`;
+  - 7 固定 sections(`identity / constraints / task_mode / action_exec / tool_usage / tone_style / text_output`)
+    拼成 `stable_system`(逐轮 byte-identical,LLM 可命中缓存)
+  - `env_info` 走 `<system-reminder type="env">` user-role 消息;Plan Mode 时再加
+    `<system-reminder type="plan_mode">`,节奏 1, 1+N, 1+2N,...(默认 N=5)
+  - `RulesConfig` 控制 7 条默认规则:`edit_requires_read / prefer_specialized_tools /
+    bash_timeout / parallel_limit / error_then_decide / absolute_paths / webfetch_to_file`,
+    禁用规则整套消失(既不出现在 system 段,也不注入 description 前缀)
+  - `LLMClient.stream(..., *, cache_breakpoints=None)` 接口,v0.4 4 个后端接受并忽略,v0.5+ 落地 cache_control
+- ✅ **/status 增量** — `input / output / cache_read / cache_write / hit_rate`
+  分行显示,命中率 = `round(cache_read / (cache_read + input) * 100, 1)`
 - ✅ 进度状态栏(`{iteration}/{max} · {phase}`)+ 底部 mode 切换
 - ✅ 11 个斜杠命令 + Esc/Ctrl+C 取消(运行中)或退出(idle)
-- ❌ 对话持久化 —— v0.4+
+- ❌ 对话持久化 —— v0.5+
 
 ## 安装
 
@@ -130,12 +144,20 @@ baozicode/
 ├── __main__.py             # python -m baozicode
 ├── cli.py                  # argparse 入口
 ├── app.py                  # Textual App（持有 conversation / llm_client / 当前 agent）
-├── agent/                  # v0.3 新增 — Agent Loop 与事件契约
-│   ├── events.py           # AgentEvent / StopReason / UsageStats / Progress
+├── agent/                  # v0.3 起 — Agent Loop 与事件契约(v0.4 接 PromptBuilder)
+│   ├── events.py           # AgentEvent / StopReason / UsageStats(cache_read/cache_write)/ Progress
 │   ├── collector.py        # StreamCollector + TurnSnapshot（双路收集）
 │   ├── guards.py           # 三层 stop guards（unknown / deny / failed loop）
 │   ├── scheduler.py        # 工具并发调度（side_effect 驱动 batch 切分）
 │   └── loop.py             # Agent.run(user_message) → AsyncIterator[AgentEvent]
+│                            #   v0.4:__init__ 收 config: AppConfig;_inject_reminders 把
+│                            #   <system-reminder> 拼到 messages[-2]
+├── prompt/                 # v0.4 新增 — 模块化 system prompt
+│   ├── types.py            # BuiltPrompt / BuildContext / CacheBreakpoint / SystemReminder
+│   ├── rules.py            # Rule + RuleRegistry + 7 DEFAULT_RULES + augment_tool()
+│   ├── reminder.py         # PlanModeReminder(节奏控制)
+│   ├── builder.py          # PromptBuilder.build() 一次构建多次复用
+│   └── sections/           # 11 个 section renderers(7 固定 + env_info + 3 可选)
 ├── tui/
 │   ├── chat_screen.py      # 主对话屏幕（订阅 Agent 事件流 + 11 slash 命令 + 状态栏）
 │   ├── tool_card.py        # ToolCallCard / ToolResultCard
