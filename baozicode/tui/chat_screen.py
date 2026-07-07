@@ -398,7 +398,7 @@ class ChatScreen(Screen):
             tools=self._get_tools(),
             conversation=app.conversation,
             permissions=perms,
-            system_prompt=app.config.system_prompt,
+            config=app.config,
             max_iterations=app.config.active_agent().max_iterations,
             plan_mode=self.plan_mode,
             permission_callback=self._permission_callback,
