@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-0.4.0-blue)
+![version](https://img.shields.io/badge/version-0.5.0-blue)
 
 ## 是什么
 
@@ -17,7 +17,7 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
 - 🔁 **Agent Loop（v0.3 核心）** — ReAct 自主循环,一次消息可跨多轮(默认 20 轮),
   自动判断何时停止(模型说完 / 迭代上限 / 取消 / 连续幻觉 / 拒绝累积 / 失败死循环)
 - 🧰 **7 个工具** — Read / Write / Edit / Bash / Grep / Glob / WebFetch,side_effect 标记驱动并发调度
-- 🔒 **权限控制** — auto_allow / deny / batch_confirm + `/auto` 本会话跳过所有 Modal
+- 🔒 **权限控制** — 五层防御(v0.5):L1 黑名单 / L2 沙箱 / L3 规则引擎 / L4 模式(strict/default/permissive) / L5 人在回路
 - 📋 **Plan Mode（v0.3）** — `/plan <task>` 先读后规划,`/do` 再切全工具执行
 - 🧱 **模块化 system prompt（v0.4 新增）** — 11 段拼装,稳定指令走 LLM 缓存通道,
   动态指令通过 `<system-reminder>` 注入,7 条规则可独立开关
@@ -110,7 +110,8 @@ python -m baozicode  # 等价
 | `/exit` | 退出（Ctrl+C 同样有效） |
 | `/model` | 切换到另一后端 |
 | `/tools` | 列出 7 个工具（含 side_effect 标记） |
-| `/permissions` | 显示当前生效的权限配置 |
+| `/permissions` | 显示当前生效的权限配置（五层防御版本） |
+| `/permissions mode` | 切换权限模式（strict / default / permissive） |
 | `/plan [task]` | 进入 plan mode（只读工具）+ 可选运行任务 |
 | `/do [task]` | 退出 plan mode（全工具）+ 可选运行任务 |
 | `/auto` | 切换 auto 模式（跳过本会话所有 Modal） |
@@ -136,6 +137,71 @@ python -m baozicode  # 等价
 - `Write` — 整文件覆写（自动创建父目录）
 - `Edit` — `old_string` 精确替换（必须唯一）
 - `Bash` — shell 命令（cwd 锁项目根，`cd` 在根内可跟随）
+
+## 权限系统（v0.5 五层防御）
+
+工具调用通过 5 层防御逐级放行,**deny-veto**(任何层 deny 即拒,即使其它层 allow):
+
+```
+L1 黑名单  →  L2 沙箱  →  L3 规则  →  L4 mode  →  L5 人在回路
+   ↑           ↑           ↑           ↑            ↑
+ 不可配       不可配     可配        可配         用户决策
+ 硬拦截     symlink     三层 YAML   strict/      4 档 Modal:
+            resolve      合并        default/    Y 仅本次
+            前缀判断     (allow/     permissive  A 本会话
+                         deny 规则)               P 永久
+                                              N 拒绝
+```
+
+**L1 黑名单(硬拦截)**:正则匹配 `rm -rf /`、`sudo rm/chmod/chown`、`chmod 777`、
+`dd if=...`、`mkfs`、`curl|sh`、fork bomb、`mv / /dev/null`、写 `/etc/passwd`、
+写 `~/.ssh/authorized_keys`、`bash -c` / `sh -c` 任何形式。**这层无法被配置放开**,
+任何 mode(包括 permissive)都会拦。
+
+**L2 沙箱**:Read/Write/Edit 的 `file_path` 必须 `Path.resolve()` 后落在
+`project_root` 内(`is_relative_to` 判断,先 resolve symlink 防逃逸);
+Bash 命令中的路径字面量用保守正则提取,任何 shell expansion marker
+(`$VAR` / `${VAR}` / `$(...)` / `` ` `` / `~`)整条拒。
+
+**L3 规则引擎**:三层 YAML 按优先级合并,deny 命中立即短路:
+- `<project>/.baozicode/permissions.local.yaml` (不入 git,本机优先)
+- `<project>/.baozicode/permissions.yaml` (项目级,提交进 git)
+- `~/.config/baozicode/permissions.yaml` (用户全局,跨项目)
+
+规则语法示例:
+```yaml
+mode: default       # strict | default | permissive
+rules:
+  - tool: Bash
+    pattern: "git *"      # fnmatch glob,匹配任一 argument 字符串
+    decision: allow
+  - tool: Bash
+    pattern: "rm *"
+    decision: deny
+```
+
+**L4 模式档位**:
+- `strict` — fallthrough 全部拒(任何规则没覆盖的都直接 is_error)
+- `default` — fallthrough 弹 L5 Modal 让用户决定
+- `permissive` — fallthrough 全部过(对调试 / 受信任项目友好)
+
+**L5 人在回路**:default mode 下,`PermissionModal` 弹出 4 档选择:
+- `Y 仅本次` — 放行这一次
+- `A 本会话` — 加 session rule,放行到本次进程结束
+- `P 永久` — 追加到 `permissions.local.yaml`,放行到本机所有未来会话
+- `N 拒绝` — 拒(is_error 喂回 LLM)
+
+按 P 永久存储的不是精确命令字符串,而是 glob 模糊模式
+(如 `npm test --coverage` → `npm test *`)。
+
+**deny 不终止 Agent Loop**:5 层任一 deny 只是把 is_error 喂回 LLM,
+`Agent.run()` 不中断。同一工具被连续拒 ≥ `denial_warn_threshold` 次(默认 5),
+`<system-reminder type="denial_rate_limit">` 注入 LLM 上下文,提示它调整策略
+(改工具 / 改参数 / 询问用户 / 放弃)。
+
+**配置建议**:
+- `.baozicode/permissions.local.yaml` 加进 `.gitignore`(本机偏好不进版本控制)
+- 项目级规则放 `.baozicode/permissions.yaml` 提交进 git,团队共享
 
 ## 项目结构
 
