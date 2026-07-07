@@ -4,15 +4,15 @@
 
 ## 1. Phase 1 — 拼装骨架 (Skeleton)
 
-- [ ] 1.1 Create `baozicode/prompt/__init__.py` re-exporting public API
-- [ ] 1.2 Create `baozicode/prompt/types.py` with `BuiltPrompt`, `BuildContext`, `CacheBreakpoint`, `SystemReminder` dataclasses
-- [ ] 1.3 Create `baozicode/prompt/rules.py` with `Rule`, `RuleRegistry`, and 7 `DEFAULT_RULES`
-- [ ] 1.4 Create `baozicode/prompt/reminder.py` with `PlanModeReminder` class
-- [ ] 1.5 Create 7 fixed section renderers in `baozicode/prompt/sections/`: `identity`, `constraints`, `task_mode`, `action_exec`, `tool_usage`, `tone_style`, `text_output`
-- [ ] 1.6 Create 4 dynamic/optional section renderers: `env_info`, `custom`, `skills`, `memory`
-- [ ] 1.7 Create `baozicode/prompt/builder.py` with `PromptBuilder.build()` assembling all 11 sections
-- [ ] 1.8 Write unit tests in `tests/test_prompt_modules.py`, `tests/test_rule_registry.py`, `tests/test_plan_reminder.py`, `tests/test_prompt_builder.py`
-- [ ] 1.9 Verify existing 67 v0.3 tests still pass; total new tests ≥ 21
+- [x] 1.1 Create `baozicode/prompt/__init__.py` re-exporting public API
+- [x] 1.2 Create `baozicode/prompt/types.py` with `BuiltPrompt`, `BuildContext`, `CacheBreakpoint`, `SystemReminder` dataclasses
+- [x] 1.3 Create `baozicode/prompt/rules.py` with `Rule`, `RuleRegistry`, and 7 `DEFAULT_RULES`
+- [x] 1.4 Create `baozicode/prompt/reminder.py` with `PlanModeReminder` class
+- [x] 1.5 Create 7 fixed section renderers in `baozicode/prompt/sections/`: `identity`, `constraints`, `task_mode`, `action_exec`, `tool_usage`, `tone_style`, `text_output`
+- [x] 1.6 Create 4 dynamic/optional section renderers: `env_info`, `custom`, `skills`, `memory`
+- [x] 1.7 Create `baozicode/prompt/builder.py` with `PromptBuilder.build()` assembling all 11 sections
+- [x] 1.8 Write unit tests in `tests/test_prompt_modules.py`, `tests/test_rule_registry.py`, `tests/test_plan_reminder.py`, `tests/test_prompt_builder.py`
+- [x] 1.9 Verify existing 67 v0.3 tests still pass; total new tests ≥ 21
 
 ## 2. Phase 2 — Agent 集成 (Agent Integration)
 
