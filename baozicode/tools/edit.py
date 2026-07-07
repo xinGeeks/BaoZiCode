@@ -37,6 +37,7 @@ TOOL = ToolDefinition(
     },
     risk="high",
     side_effect=True,
+    path_args=["file_path"],
 )
 
 

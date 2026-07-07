@@ -50,6 +50,7 @@ TOOL = ToolDefinition(
     },
     risk="low",
     side_effect=False,
+    path_args=["path"],
 )
 
 

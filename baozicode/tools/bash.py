@@ -59,6 +59,7 @@ TOOL = ToolDefinition(
     },
     risk="high",
     side_effect=True,
+    path_args=[],  # Bash 的路径由 PathSandbox 用 regex 自行提取
 )
 
 

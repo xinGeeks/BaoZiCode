@@ -22,14 +22,16 @@ from baozicode.agent.collector import StreamCollector
 from baozicode.agent.events import AgentEvent, ProgressPhase, StopReason, UsageStats
 from baozicode.agent.guards import (
     GuardState,
-    check_deny_threshold,
     check_failed_loop,
     check_unknown_tool,
-    record_denial,
+    record_denial_warn,
+    should_inject_denial_reminder,
 )
 from baozicode.agent.scheduler import annotate_calls, schedule
 from baozicode.config.schema import AppConfig
 from baozicode.llm.base import LLMClient, Message
+from baozicode.permissions.engine import RuleEngine
+from baozicode.permissions.types import MergedPermissions, PermissionMode
 from baozicode.prompt import PromptBuilder, PlanModeReminder
 from baozicode.prompt.types import BuiltPrompt
 from baozicode.tools.base import ToolCall, ToolDefinition, ToolResult
@@ -42,6 +44,12 @@ _PLAN_MODE_REMINDER_BODY = (
     "当前处于 Plan Mode 阶段:你只能使用无副作用工具(Read/Grep/Glob/WebFetch),"
     "用以编写或修订实施计划。正在编写 / 修订计划 = 是,"
     "直接执行修改系统 / 写文件的工具调用 = 否。"
+)
+
+_DENIAL_REMINDER_BODY = (
+    "提示:你刚才的工具调用被权限层拒绝了。"
+    "如果它确实是必要的,请检查调用参数或换用其他工具;"
+    "如果不确定,请向用户询问。"
 )
 
 
@@ -70,17 +78,29 @@ class Agent:
         max_iterations: int = 20,
         plan_mode: bool = False,
         permission_callback: PermissionCallback | None = None,
+        session_mode: PermissionMode | None = None,
+        merged_permissions: MergedPermissions | None = None,
+        permissions_engine: RuleEngine | None = None,
     ) -> None:
         if config is None:
             raise ValueError("Agent requires AppConfig in v0.4+")
         self._llm = llm_client
         self._all_tools = tools
         self._conversation = conversation
-        self._permissions = permissions
+        self._permissions = permissions  # v0.2 兼容字段
         self._config = config
         self._plan_mode = plan_mode
         self._max_iterations = max_iterations
         self._permission_callback = permission_callback
+        # v0.5: session 级 mode override;None 时由 L4 在跑时从 merged.mode 兜底
+        # 设计上:mode 切换不热更当前 Agent,只对下一个新建的 Agent 生效
+        self._session_mode = session_mode
+        # v0.5: 5 层防御合并状态;None 时退回 v0.2 旧路径(_matches_deny 等)
+        self._merged = merged_permissions
+        # v0.5:稳定的 RuleEngine 实例 — SESSION 按钮累积的 allow 规则
+        # 存在 merged.session_rules,engine 通过 merged 间接看到,
+        # 这里保存它以保证 add_session_rule 走的是同一个 merged。
+        self._engine = permissions_engine
         self._cancel_event = asyncio.Event()
         # PromptBuilder 构造一次,后续 run 都复用
         self._prompt: BuiltPrompt = PromptBuilder().build(
@@ -111,12 +131,18 @@ class Agent:
         """暴露给测试 / TUI 调试用的 BuiltPrompt 句柄。"""
         return self._prompt
 
-    def _inject_reminders(self, messages: list[Message], iteration: int) -> list[Message]:
+    def _inject_reminders(
+        self,
+        messages: list[Message],
+        iteration: int,
+        guard_state: GuardState | None = None,
+    ) -> list[Message]:
         """在 messages[-2] 处插入所有 active reminders(<system-reminder> user-role 消息)。
 
         Args:
             messages: 当前对话历史(最后一条是 user)
             iteration: 当前 1-indexed 迭代轮次,plan_mode reminder 节奏控制用
+            guard_state: v0.5 新增 — 用于判断 denial_rate_limit reminder 是否注入
 
         Returns:
             新的 messages 列表(原列表不变,防止在迭代器消费时损坏)
@@ -144,10 +170,30 @@ class Agent:
                 )
             )
 
+        # 3) v0.5: denial_rate_limit reminder(任一工具达到 denial_warn_threshold)
+        if guard_state is not None:
+            threshold = agent_cfg.denial_warn_threshold
+            for name, count in guard_state.deny_counts.items():
+                if count >= threshold:
+                    reminders.append(
+                        Message(
+                            role="user",
+                            content=(
+                                '<system-reminder type="denial_rate_limit" '
+                                'ttl="sticky">\n'
+                                f"工具 `{name}` 已被连续拒绝 {count} 次(阈值 {threshold})。"
+                                f"{_DENIAL_REMINDER_BODY}\n"
+                                "</system-reminder>"
+                            ),
+                        )
+                    )
+                    # 只提醒一次最高频的工具,避免 reminder 爆炸
+                    break
+
         if not reminders:
             return list(messages)
 
-        # 3) splice 到 messages[-2](user 消息保持最后位置)
+        # 4) splice 到 messages[-2](user 消息保持最后位置)
         out = list(messages)
         if len(out) == 0:
             # 第一轮迭代前 conversation 还没塞 user,全部追加
@@ -176,7 +222,7 @@ class Agent:
                 # ---- LLM stream ----
                 # v0.4: messages 注入 reminders,system/tools 来自 self._prompt
                 messages_for_llm = self._inject_reminders(
-                    self._conversation.to_list(), iteration
+                    self._conversation.to_list(), iteration, guard_state
                 )
                 collector = StreamCollector()
                 this_turn_usage = UsageStats()
@@ -249,41 +295,11 @@ class Agent:
                 annotate_calls(valid_calls, side_effect_map)
 
                 async def executor(call: ToolCall) -> ToolResult:
-                    # 权限检查:deny → 立即拒绝;auto_allow → 直接执行;
-                    # 其他 → 委托给 TUI 的 permission_callback(它会弹 Modal)。
-                    if self._matches_deny(call):
-                        record_denial(guard_state, call.name)
-                        return ToolResult(
-                            tool_call_id=call.id,
-                            content=(
-                                f"Tool call denied by permissions.deny "
-                                f"(matched pattern for {call.name})."
-                            ),
-                            is_error=True,
-                        )
-                    if not self._is_auto_allowed(call):
-                        if self._permission_callback is None:
-                            # 没有回调时(v0.2 兼容/headless 模式)按拒绝处理
-                            record_denial(guard_state, call.name)
-                            return ToolResult(
-                                tool_call_id=call.id,
-                                content=(
-                                    f"Tool {call.name} requires user "
-                                    f"confirmation (no permission_callback)."
-                                ),
-                                is_error=True,
-                            )
-                        allowed = await self._permission_callback(call)
-                        if not allowed:
-                            record_denial(guard_state, call.name)
-                            return ToolResult(
-                                tool_call_id=call.id,
-                                content=(
-                                    f"Tool {call.name} denied by user."
-                                ),
-                                is_error=True,
-                            )
-                    return await execute_tool_call(call)
+                    # v0.5:5 层防御 + L5 user 决策
+                    if self._merged is not None:
+                        return await self._v5_executor(call, guard_state)
+                    # v0.2 兼容路径(无 merged_permissions)
+                    return await self._v2_executor(call, guard_state)
 
                 # 调度并 yield 每个 tool_result 事件
                 async for result in self._run_scheduler(valid_calls, executor, guard_state):
@@ -309,14 +325,8 @@ class Agent:
                 if terminate_reason is not None:
                     break
 
-                # ---- 拒绝阈值检查(本轮结束累计) ----
-                for call in valid_calls:
-                    reason = check_deny_threshold(call, guard_state)
-                    if reason is not None:
-                        terminate_reason = reason
-                        break
-                if terminate_reason is not None:
-                    break
+                # v0.5:deny 不再终止 Agent Loop,只通过 reminder 提示 LLM
+                # 老的 check_deny_threshold() 已 no-op,这里不再 break
         finally:
             if terminate_reason is None:
                 # 跑完循环但没有显式 reason → 兜底 MAX_ITERATIONS_REACHED
@@ -324,6 +334,85 @@ class Agent:
             yield AgentEvent.done(terminate_reason)
 
     # ---- helpers ----
+
+    async def _v5_executor(
+        self,
+        call: ToolCall,
+        guard_state: GuardState,
+    ) -> ToolResult:
+        """v0.5 executor:5 层防御 + L5 user 决策。
+
+        流程:
+        1. permissions.check(call, self._merged) → L1/L2/L3/L4
+        2. deny → 立即返回 is_error(并累计 deny 计数,触发 reminder)
+        3. allow → 直接执行
+        4. fallthrough → 走 L5 user(permission_callback),按用户选择放行/拒绝
+        """
+        from baozicode.permissions import check as perms_check
+
+        decision = perms_check(call, self._merged)
+
+        if decision.decision == "deny":
+            record_denial_warn(guard_state, call.name)
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"工具调用被 {decision.layer} 拒绝: {decision.reason}"
+                ),
+                is_error=True,
+            )
+
+        if decision.decision == "allow":
+            return await execute_tool_call(call)
+
+        # fallthrough → L5 user
+        return await self._handle_user_decision(call, guard_state)
+
+    async def _handle_user_decision(
+        self,
+        call: ToolCall,
+        guard_state: GuardState,
+    ) -> ToolResult:
+        """L5 user 决策:走 permission_callback,或 headless 模式按拒绝处理。"""
+        if self._permission_callback is None:
+            record_denial_warn(guard_state, call.name)
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Tool {call.name} requires user confirmation "
+                    f"(no permission_callback, default deny)."
+                ),
+                is_error=True,
+            )
+        allowed = await self._permission_callback(call)
+        if not allowed:
+            record_denial_warn(guard_state, call.name)
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Tool {call.name} denied by user.",
+                is_error=True,
+            )
+        return await execute_tool_call(call)
+
+    async def _v2_executor(
+        self,
+        call: ToolCall,
+        guard_state: GuardState,
+    ) -> ToolResult:
+        """v0.2 兼容 executor:无 merged_permissions 时走原 _matches_deny / _is_auto_allowed。"""
+        if self._matches_deny(call):
+            record_denial_warn(guard_state, call.name)
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Tool call denied by permissions.deny "
+                    f"(matched pattern for {call.name})."
+                ),
+                is_error=True,
+            )
+        if not self._is_auto_allowed(call):
+            return await self._handle_user_decision(call, guard_state)
+        return await execute_tool_call(call)
 
     async def _run_scheduler(
         self,

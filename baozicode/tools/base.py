@@ -46,6 +46,10 @@ class ToolDefinition:
     - False:Read / Grep / Glob / WebFetch —— 只读,可并发
     调度器用此字段决定并发 vs 串行;Plan Mode 用此字段做工具过滤。
     默认 False 保证 v0.2 调用方零修改。
+
+    `path_args` (v0.5 新增):声明此工具的哪些 argument 取值是文件系统路径。
+    L2 路径沙箱用此字段做 sandbox check;Bash 的 path 提取走独立 regex。
+    例:Read/Write/Edit → ["file_path"];Grep/Glob → ["path"];Bash → []。
     """
 
     name: str
@@ -53,6 +57,7 @@ class ToolDefinition:
     parameters: dict[str, Any]  # JSON Schema
     risk: Risk = "low"
     side_effect: bool = False
+    path_args: list[str] = field(default_factory=list)
 
     def to_anthropic(self) -> dict[str, Any]:
         """转换为 Anthropic SDK 的 tool 格式。"""

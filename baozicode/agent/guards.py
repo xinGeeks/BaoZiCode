@@ -1,14 +1,22 @@
-"""三层 stop guards — 防止 Agent 跑飞。
+"""三层 stop guards — 防止 Agent 跑飞(v0.5 调整 deny 行为)。
 
 D4 决策:
 - 三个 guard 是独立判断函数(纯函数,无副作用)
 - 共享 GuardState(deny_counts / recent_failures / recent_unknown)
-- 任一返回 StopReason → Agent._terminate(reason) 触发
+
+v0.5 调整(denial 行为):
+- v0.4:同 tool_name 累计 deny 3 次 → DENIALS_EXCEEDED 终止
+- v0.5:deny **不再终止** Agent Loop;改为当某工具连续拒绝次数达到
+  `denial_warn_threshold` 时,向 LLM 注入 `<system-reminder type="denial_rate_limit">`,
+  提示它调整策略(换工具、改参数、问用户等)
+- 行为变化:`StopReason.DENIALS_EXCEEDED` 不再被 Agent 触发,
+  仍保留为枚举值(backward compat);改用 `should_inject_denial_reminder` 钩子
 
 阈值(从 spec 拍板):
-- (a) 未知工具:连续 2 次同未知名 → UNKNOWN_TOOL_HALLUCINATION
-- (b) 拒绝累计:同 tool_name 累计 deny 3 次 → DENIALS_EXCEEDED
-- (c) 失败循环:同 (name, sha256(error_msg)[:16]) 连续 3 次 → FAILED_TOOL_LOOP
+- (a) 未知工具:连续 2 次同未知名 → UNKNOWN_TOOL_HALLUCINATION(未变)
+- (b) 拒绝累计:同 tool_name 累计 ≥ `denial_warn_threshold`(默认 5)→
+      注入 reminder(不再终止)
+- (c) 失败循环:同 (name, sha256(error_msg)[:16]) 连续 3 次 → FAILED_TOOL_LOOP(未变)
 """
 
 from __future__ import annotations
@@ -68,18 +76,6 @@ def check_unknown_tool(
     return None
 
 
-def check_deny_threshold(call, state: GuardState) -> StopReason | None:
-    """(b) 同 tool_name 累计被拒 3 次。
-
-    调用方在 deny 时(用户按 N 或 permissions.deny 命中)调 record_denial(state, name)
-    把计数 +1,然后调用此函数判断是否到阈值。
-    """
-    name = call.name
-    if state.deny_counts.get(name, 0) >= 3:
-        return StopReason.DENIALS_EXCEEDED
-    return None
-
-
 def check_failed_loop(call, state: GuardState, error_msg: str) -> StopReason | None:
     """(c) 同 (name, error_hash) 连续 3 次失败。
 
@@ -97,16 +93,52 @@ def check_failed_loop(call, state: GuardState, error_msg: str) -> StopReason | N
     return None
 
 
-def record_denial(state: GuardState, name: str) -> None:
-    """累计一次 deny。Agent 在用户按 N 或 permissions.deny 命中时调。"""
+# ---- v0.5 改造:deny 不再终止,改为 reminder ----
+
+def record_denial_warn(state: GuardState, name: str) -> None:
+    """累计一次 deny。Agent 在每次工具调用被拒时调。
+
+    v0.5:不再触发 DENIALS_EXCEEDED,只用于 should_inject_denial_reminder 判断。
+    """
     state.deny_counts[name] = state.deny_counts.get(name, 0) + 1
+
+
+def should_inject_denial_reminder(
+    tool_name: str,
+    state: GuardState,
+    threshold: int = 5,
+) -> bool:
+    """(b) v0.5 替代 `check_deny_threshold`:是否该向 LLM 注入 denial reminder。
+
+    返回 True 表示同一 tool_name 累计拒绝次数达到阈值,Agent 应在
+    `_inject_reminders` 中追加 `<system-reminder type="denial_rate_limit">`。
+    """
+    return state.deny_counts.get(tool_name, 0) >= threshold
+
+
+# ---- v0.4 兼容:旧 API 保留,内部转调 ----
+
+def record_denial(state: GuardState, name: str) -> None:
+    """v0.4 兼容 API,内部转调 `record_denial_warn`。"""
+    record_denial_warn(state, name)
+
+
+def check_deny_threshold(call, state: GuardState) -> StopReason | None:
+    """v0.4 兼容:旧逻辑下"同 tool_name 累计 3 次 → DENIALS_EXCEEDED"。
+
+    v0.5:此函数永远返回 None(deny 不再终止)。保留是为了不破坏旧 import。
+    """
+    # 故意不实现终止语义 — 见 D7:deny 不终止 Agent Loop
+    return None
 
 
 __all__ = [
     "GuardState",
-    "check_deny_threshold",
+    "check_deny_threshold",  # v0.4 兼容,实际 no-op
     "check_failed_loop",
     "check_unknown_tool",
     "error_signature",
-    "record_denial",
+    "record_denial",          # v0.4 兼容
+    "record_denial_warn",     # v0.5 推荐
+    "should_inject_denial_reminder",
 ]

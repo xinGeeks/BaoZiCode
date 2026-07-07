@@ -111,3 +111,52 @@ deepseek:
 #     webfetch_to_file: true             # WebFetch 大内容落临时文件再用 Read
 #     # 例:关掉 webfetch_to_file,因为本项目不联网
 #     # webfetch_to_file: false
+#
+# denial_warn_threshold：v0.5 — 同一工具连续拒绝次数 ≥ 此值时,向 LLM 注入
+#   `<system-reminder type="denial_rate_limit">` 提醒它调整策略(不终止 loop)
+#   默认 5。调到 3 更敏感,调到 10 更宽容。
+
+# 五层防御权限系统（v0.5 新增；整个块可省略，省略时全部走 default mode + 无规则）
+#
+# 设计：
+# - mode 三档:strict(默认拒)/ default(弹 Modal)/ permissive(默认过)
+# - rules 静态规则(glob 匹配,支持 fnmatch 的 * / ? / [seq])
+# - L1 硬黑名单(r'rm -rf /' 等)无法被配置覆盖,任何 mode 都拦
+# - L2 沙箱把文件操作锁在 project_root 内,做 symlink 解析防逃逸
+# - 规则可放本 config / 项目级 .baozicode/permissions.yaml / 用户级
+#   ~/.config/baozicode/permissions.yaml / 项目级 .baozicode/permissions.local.yaml
+# - 也可拆成 sidecar 文件:与 config.yaml 同目录的 permissions*.yaml 会被自动合并
+#
+# 完整优先级(deny-veto):
+#   session(运行时 add) > local(项目,不入 git) > project(项目) > user_global(~/.config)
+#
+# permissions_v5:
+#   mode: default
+#   rules:
+#     # 放行 git / npm test(只读/测试,无副作用)
+#     - tool: Bash
+#       pattern: "git *"
+#       decision: allow
+#     - tool: Bash
+#       pattern: "npm test *"
+#       decision: allow
+#     - tool: Bash
+#       pattern: "pytest *"
+#       decision: allow
+#     # 拒危险操作(L1 黑名单已拦,这里再加一层防御)
+#     - tool: Bash
+#       pattern: "rm *"
+#       decision: deny
+#     - tool: Bash
+#       pattern: "sudo *"
+#       decision: deny
+#     # 拒写 .env / 凭证文件
+#     - tool: Read
+#       pattern: "*.env"
+#       decision: deny
+#     - tool: Write
+#       pattern: "*.env"
+#       decision: deny
+#     - tool: Edit
+#       pattern: "*.env"
+#       decision: deny

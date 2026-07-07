@@ -36,6 +36,7 @@ TOOL = ToolDefinition(
     },
     risk="low",
     side_effect=False,
+    path_args=[],  # WebFetch 的是 URL,不是文件系统路径
 )
 
 

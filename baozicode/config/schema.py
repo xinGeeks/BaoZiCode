@@ -66,6 +66,10 @@ class AgentConfig(BaseModel):
     `max_iterations` 是安全网,Agent 跑到这个迭代次数还没结束就强制终止
     (`done.reason=MAX_ITERATIONS_REACHED`)。默认 20 足以应对绝大多数任务,
     又能在 LLM 进入死循环时及时阻断。
+
+    v0.5 新增:
+    - `denial_warn_threshold`:连续拒绝次数达到此值,向 LLM 注入 reminder
+      提醒它调整策略(不终止 loop)
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -73,7 +77,37 @@ class AgentConfig(BaseModel):
     max_iterations: int = 20
     enable_system_reminders: bool = True
     plan_reminder_interval: int = 5
+    denial_warn_threshold: int = 5
     rules: RulesConfig = Field(default_factory=RulesConfig)
+
+
+class PermissionRuleYaml(BaseModel):
+    """v0.5 — 配置文件里单条权限规则的 Pydantic 表示。
+
+    与 `baozicode.permissions.types.PermissionRule`(dataclass)对应,
+    但 `source` 字段在加载时由 loader 注入,不在 YAML 里手写。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    tool: str
+    pattern: str
+    decision: Literal["allow", "deny"]
+
+
+class PermissionsV5(BaseModel):
+    """v0.5 — 新版权限系统,直接嵌在 `config.yaml` 顶层。
+
+    - `mode` 全局默认模式(可选;local YAML 仍可覆盖)
+    - `rules` 静态规则列表(项目级 / 用户级均可放)
+    - 运行时动态的 session rule / local YAML 不进 Pydantic schema,
+      走 `MergedPermissions` / `persistence.append_rule_to_local_yaml`
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: Literal["strict", "default", "permissive"] = "default"
+    rules: list[PermissionRuleYaml] = Field(default_factory=list)
 
 
 class AppConfig(BaseModel):
@@ -86,6 +120,9 @@ class AppConfig(BaseModel):
     - `custom_instructions` 用户追加的额外说明(喂给 PromptBuilder 的 custom section)
     - `skills_dir` skills 文件目录(扫不到时静默跳过)
     - `memory_path` 长效记忆文件(不存在时静默跳过)
+
+    v0.5 新增字段:
+    - `permissions_v5` 新版三层 YAML 规则(可选;为空时走 v0.2 旧 Permissions)
     """
 
     backend: BackendName
@@ -98,6 +135,7 @@ class AppConfig(BaseModel):
     minimax: BackendConfig
     deepseek: BackendConfig
     permissions: Permissions | None = None
+    permissions_v5: PermissionsV5 | None = None
     agent: AgentConfig | None = None
 
     def active(self) -> BackendConfig:
@@ -127,6 +165,8 @@ __all__ = [
     "AppConfig",
     "BackendConfig",
     "BackendName",
+    "PermissionRuleYaml",
     "Permissions",
+    "PermissionsV5",
     "RulesConfig",
 ]
