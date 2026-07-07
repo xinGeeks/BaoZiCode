@@ -111,7 +111,7 @@ def test_plan_mode_hides_side_effect_tool_at_constructor_layer() -> None:
 class _NoopLLM(LLMClient):
     """用最少实现让 Agent 跑起来;其实只测 available_tools,不走 run。"""
 
-    async def stream(self, messages, system=None, tools=None):
+    async def stream(self, messages, system=None, tools=None, *, cache_breakpoints=None):
         if False:
             yield ContentDelta(type="text", text="")
 
@@ -122,7 +122,7 @@ class _PlanModeResistingLLM(LLMClient):
     def __init__(self) -> None:
         self.calls = 0
 
-    async def stream(self, messages, system=None, tools=None):
+    async def stream(self, messages, system=None, tools=None, *, cache_breakpoints=None):
         self.calls += 1
         # 偷看 Agent 给的 tools 列表 — plan mode 下不应包含 Bash
         available_names = [t.name for t in tools] if tools else []

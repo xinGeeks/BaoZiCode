@@ -36,6 +36,8 @@ class _ScriptedLLM(LLMClient):
         messages: list[Message],
         system: str | None = None,
         tools=None,
+        *,
+        cache_breakpoints=None,
     ) -> AsyncIterator[ContentDelta]:
         self.call_count += 1
         if self.fail_on_call is not None and self.call_count == self.fail_on_call:
@@ -170,7 +172,7 @@ async def test_user_cancellation_via_event() -> None:
         def __init__(self):
             self.cancelled = False
 
-        async def stream(self, messages, system=None, tools=None):
+        async def stream(self, messages, system=None, tools=None, *, cache_breakpoints=None):
             yield ContentDelta(type="text", text="working")
             # 这里模拟一个慢流;await cancel 会在事件循环下一拍让它跑完
             await asyncio.sleep(0.05)
@@ -317,7 +319,7 @@ async def test_stable_system_passed_to_llm_stream() -> None:
         def __init__(self):
             self.last_system: str | None = None
 
-        async def stream(self, messages, system=None, tools=None):
+        async def stream(self, messages, system=None, tools=None, *, cache_breakpoints=None):
             self.last_system = system
             yield ContentDelta(type="text", text="ok")
 

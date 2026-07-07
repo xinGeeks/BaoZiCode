@@ -102,7 +102,10 @@ class OpenAICompatibleBackend(LLMClient):
         messages: list[Message],
         system: str | None = None,
         tools: list[ToolDefinition] | None = None,
+        *,
+        cache_breakpoints: list | None = None,
     ) -> AsyncIterator[ContentDelta]:
+        # cache_breakpoints is accepted but ignored in v0.4; v0.5+ will translate to SDK cache_control
         sdk_messages = _convert_messages(messages)
         if system:
             sdk_messages.insert(0, {"role": "system", "content": system})

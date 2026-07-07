@@ -330,6 +330,8 @@ class ChatScreen(Screen):
         perms = app.config.active_permissions()
         agent_cfg = app.config.active_agent()
         usage = app.session_usage
+        total = usage.cache_read_tokens + usage.input_tokens
+        hit_rate = round(usage.cache_read_tokens / total * 100, 1) if total > 0 else 0.0
         lines = [
             "**当前状态**\n",
             f"- mode: `{'plan' if self.plan_mode else 'full'}`（"
@@ -340,10 +342,12 @@ class ChatScreen(Screen):
             f"- max_iterations: `{agent_cfg.max_iterations}`",
             f"- permissions.auto_allow: `{perms.auto_allow or '(空)'}`",
             f"- permissions.deny: `{perms.deny or '(空)'}`",
-            f"- token 累计: input={usage.input_tokens} "
-            f"output={usage.output_tokens} "
-            f"cache_read={usage.cache_read_tokens} "
-            f"cache_write={usage.cache_write_tokens}",
+            "- token 累计:",
+            f"  - input: `{usage.input_tokens}`",
+            f"  - output: `{usage.output_tokens}`",
+            f"  - cache_read: `{usage.cache_read_tokens}`",
+            f"  - cache_write: `{usage.cache_write_tokens}`",
+            f"  - hit_rate: `{hit_rate}%`",
         ]
         self._append_info("\n".join(lines))
 

@@ -185,6 +185,7 @@ class Agent:
                         messages_for_llm,
                         system=self._prompt.stable_system,
                         tools=self._prompt.augmented_tools,
+                        cache_breakpoints=self._prompt.cache_breakpoints,
                     ):
                         if delta.type == "text":
                             async for chunk in collector.absorb(delta):

@@ -42,6 +42,8 @@ class _FakeLLM(LLMClient):
         messages: list[Message],
         system: str | None = None,
         tools=None,
+        *,
+        cache_breakpoints=None,
     ) -> AsyncIterator[ContentDelta]:
         # 记录 kwargs(传引用不影响外面,但 messages 长度和内容会被之后断言)
         self.call_kwargs.append(
@@ -66,7 +68,7 @@ class _NoopLLM(LLMClient):
     def __init__(self) -> None:
         self.kwargs_list: list[dict] = []
 
-    async def stream(self, messages, system=None, tools=None) -> AsyncIterator[ContentDelta]:
+    async def stream(self, messages, system=None, tools=None, *, cache_breakpoints=None) -> AsyncIterator[ContentDelta]:
         self.kwargs_list.append(
             {"messages": list(messages), "system": system, "tools": list(tools) if tools else []}
         )

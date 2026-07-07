@@ -109,11 +109,19 @@ class LLMClient(ABC):
         messages: list[Message],
         system: str | None = None,
         tools: list[ToolDefinition] | None = None,
+        *,
+        cache_breakpoints: list | None = None,
     ) -> AsyncIterator[ContentDelta]:
         """流式生成回答。
 
         - `system`: 不属于 messages 的全局系统提示（v0.1 沿用）
         - `tools`: v0.2 新增；None 或 [] 表示不传 tools 参数给 SDK（保留 v0.1 行为）
+        - `cache_breakpoints`: v0.4 新增；预期传 `list[CacheBreakpoint]`
+          （来自 `baozicode.prompt.types.CacheBreakpoint`）。这里故意只标 `list`
+          而非 `list[CacheBreakpoint]`，以避免 `baozicode.llm.base` 与
+          `baozicode.prompt.types` 互相 import 形成循环（prompt 包本身依赖
+          `baozicode.llm.base.Message`）。后端在 v0.4 接受此参数但忽略其值；
+          v0.5+ 会把断点翻译成各家 SDK 的 cache_control 标记。
         """
         if False:  # pragma: no cover - 强制声明为 generator
             yield ContentDelta(type="text", text="")
