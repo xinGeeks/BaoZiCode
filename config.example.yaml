@@ -77,6 +77,17 @@ system_prompt: "You are BaoZiCode, a helpful AI coding assistant."
 #   dir: .baozicode/sessions                       # JSONL 文件目录(相对路径 → 拼到 project_root)
 #   retention_days: 30                             # 过期清理阈值(ge=1)
 
+# v0.9 — slash 命令参数(目前只有 review_prompt 一个字段)
+#
+# /review 在 PROMPT 类型命令里把预设文本送 Agent。模板含 {since} 占位符,
+# 运行时被 /review <since> 的 args 替换;无 args 时默认替换为 "本次会话开始"。
+# 为 null 时用 baozicode/commands/builtin.py 默认文本:
+#   "请审查当前会话自 {since} 以来的所有改动(patch、命令输出、对话)。\n
+#    输出三段:## 摘要 / ## 风险点 / ## 建议修复。"
+#
+# commands:
+#   review_prompt: "自定义 {since} 模板 ...\n## 段落 ##"
+
 # 注意：四个后端的配置块全部必填。
 # 即使当前用 anthropic，也要填好 minimax / deepseek 两块（key 和 model）。
 # 这样切换后端只需改 `backend:` 一行，config 不会"半缺失"。

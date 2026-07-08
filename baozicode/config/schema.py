@@ -161,6 +161,24 @@ class SessionConfig(BaseModel):
     retention_days: int = Field(default=30, ge=1)
 
 
+class CommandsConfig(BaseModel):
+    """v0.9 — slash 命令参数。
+
+    目前只含 `/review` 的 prompt override;`None` 时用 builtin 默认文本。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    review_prompt: str | None = Field(
+        default=None,
+        description=(
+            "可选:/review 的 prompt template override。模板里可用 {since} 占位符,"
+            "运行时会被 args(若空则 '本次会话开始')替换。"
+            "为 None 时使用 baozicode/commands/builtin.py 默认文本。"
+        ),
+    )
+
+
 class AgentConfig(BaseModel):
     """v0.3 引入 — Agent 主循环参数 + v0.4 规则与提醒节奏。
 
@@ -298,6 +316,8 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     # v0.8:会话存档(JSONL)+ 清理窗口
     sessions: SessionConfig = Field(default_factory=SessionConfig)
+    # v0.9:slash 命令参数(目前只含 /review prompt override)
+    commands: "CommandsConfig" = Field(default_factory=lambda: CommandsConfig())
 
     def active(self) -> BackendConfig:
         """返回当前激活后端的配置。"""

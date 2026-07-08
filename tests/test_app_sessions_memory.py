@@ -245,68 +245,11 @@ def test_resume_unknown_session_raises(tmp_path: Path) -> None:
         raise AssertionError("应该抛 ValueError")
 
 
-# ---- SLASH_COMMANDS 注册 ----
-
-
-def test_slash_commands_includes_v08() -> None:
-    """v0.8 的 /resume /memory /new 必须在 SLASH_COMMANDS 中。"""
-    from baozicode.tui.chat_screen import SLASH_COMMANDS
-
-    assert "/resume" in SLASH_COMMANDS
-    assert "/memory" in SLASH_COMMANDS
-    assert "/new" in SLASH_COMMANDS
-    print(f"[OK] SLASH_COMMANDS 含 v0.8: {SLASH_COMMANDS}")
-
-
-# ---- ChatScreen dispatch 路由 ----
-
-
-def test_chat_screen_dispatches_v08_commands(tmp_path: Path) -> None:
-    """`_handle_slash` 路由 /resume → _handle_resume, /memory → _show_memory, /new → _handle_new_session。"""
-    from baozicode.tui.chat_screen import ChatScreen
-
-    # 不挂 Textual app,只用 stub 模拟 self.app 和 self._append_info
-    screen = ChatScreen.__new__(ChatScreen)
-    screen._append_info = lambda *_a, **_k: None  # type: ignore[assignment]
-    called: dict[str, str] = {}
-
-    async def fake_resume():
-        called["resume"] = "ok"
-
-    def fake_memory():
-        called["memory"] = "ok"
-
-    async def fake_new():
-        called["new"] = "ok"
-
-    screen._handle_resume = fake_resume  # type: ignore[assignment]
-    screen._show_memory = fake_memory  # type: ignore[assignment]
-    screen._handle_new_session = fake_new  # type: ignore[assignment]
-
-    asyncio.run(screen._handle_slash("/resume"))
-    asyncio.run(screen._handle_slash("/memory"))
-    asyncio.run(screen._handle_slash("/new"))
-
-    assert called == {"resume": "ok", "memory": "ok", "new": "ok"}
-    print(f"[OK] /resume /memory /new 路由到正确 handler: {called}")
-
-
-def test_chat_screen_unknown_command_prints_info(tmp_path: Path) -> None:
-    """未知命令应走 _append_info 提示用户。"""
-    from baozicode.tui.chat_screen import ChatScreen
-
-    screen = ChatScreen.__new__(ChatScreen)
-    captured: list[str] = []
-
-    def fake_info(text: str) -> None:
-        captured.append(text)
-
-    screen._append_info = fake_info  # type: ignore[assignment]
-
-    asyncio.run(screen._handle_slash("/totally-unknown"))
-
-    assert any("未知命令" in t and "/totally-unknown" in t for t in captured), captured
-    print(f"[OK] 未知命令走 _append_info: {captured[0][:60]}")
+# ---- v0.9 重写:SLASH_COMMANDS 不再导出,/resume /new 并入 /session ----
+# 以下 3 个原 v0.8 slash 命令测试已迁移到:
+#   - tests/integration/test_v09_command_dispatch.py
+# 删除原 v0.6/v0.8 旧版命令派发测试,因为 v0.9 后内部 dispatcher 是 registry.
+# 下面保留 _show_memory handler 测试(不依赖 slash 命令分发)
 
 
 # ---- _show_memory handler 行为 ----

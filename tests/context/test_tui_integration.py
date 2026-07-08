@@ -143,13 +143,23 @@ def test_app_clear_calls_context_storage_cleanup(
     assert not full.exists()
 
 
-# ---- slash dispatch ----
+# ---- v0.9 重写:slash 命令改用 registry ----
 
 
-def test_slash_command_list_includes_compact() -> None:
-    """SLASH_COMMANDS 包含 /compact。"""
-    from baozicode.tui.chat_screen import SLASH_COMMANDS
-    assert "/compact" in SLASH_COMMANDS
+def test_registry_includes_compact_v09() -> None:
+    """v0.9 内置命令的 registry 包含 /compact。"""
+    from baozicode.commands.builtin import build_builtin_defs
+    from baozicode.commands.registry import CommandRegistry
+
+    async def _stub(args, ctx):
+        from baozicode.commands.registry import UiStateResult
+        return UiStateResult()
+
+    reg = CommandRegistry()
+    for d in build_builtin_defs(lambda n: _stub):
+        reg.register(d)
+    reg.freeze()
+    assert reg.lookup("compact") is not None
 
 
 def test_handle_compact_when_agent_idle_calls_run_compact_now(

@@ -2,6 +2,83 @@
 
 BaoZiCode 所有重要变更记录在此。版本号遵循 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。
 
+## [v0.9] — 2026-07
+
+### 新增能力
+
+- **Slash 命令注册中心** (`baozicode/commands/`)
+  - 顶层包 `commands/{registry,context,dispatcher,completor,builtin}.py`,
+    元数据集中 (name / aliases / description / usage / type / params_hint / hidden / handler)
+  - 启动时一次性 alias 冲突检测 (`registry.freeze()`),撞名直接 SystemExit,不延迟到运行
+  - 大小写不敏感:用户在输入框打 `/PLAN` / `/Plan` 都命中 `/plan` 主名
+  - 10 个内置命令:`/help /compact /clear /plan /do /session /memory /permission /status /review`
+    - `/permission` 主名 + `/permissions` 别名(沿用 v0.5-v0.6 老命令拼写,迁移无阻力)
+  - CommandResult 联合类型返回(`LocalResult` / `UiStateResult` / `PromptResult(text)`),
+    dispatcher 按 type 分支决定下一步动作(本地 / 切状态 / 灌进 Agent)
+
+- **三类命令执行模式**
+  - `LOCAL`: 纯本地,无 chat 回显(handler 自己 `ctx.show_info`)
+  - `UI_STATE`: 影响界面状态(切 plan_mode / session_mode / refresh status)
+  - `PROMPT`: 把预设 prompt 灌进 Agent 完整流程(handler 返回 `PromptResult(text)`,
+    dispatcher 自动 dispatch 到 `Agent.run(text)`)
+  - `/review` 是唯一 PROMPT 类型,演示预设 prompt → Agent 完整流程
+
+- **Narrow CommandContext 接口**
+  - 7 个方法:`show_info / show_error / send_to_agent / switch_mode / get_token_usage / refresh_status / push_modal`
+  - 2 个属性:`app` / `config`(escape hatch,handler 可拿全 app 句柄)
+  - handler 与 textual 解耦:不 import textual 不 import 业务模块,
+    可单元测试(Stub CommandContext),未来可被 CLI / HTTP 前端复用
+
+- **Tab 实时补全**
+  - 每次按键调 `TabCompleter.candidates()` — 单匹配直接补,多匹配返回列表,
+    hidden 命令不参与
+  - 空输入 + Tab 列全部 10 个命令(给用户 discover)
+  - 已进 args 区(输入包含空格)Tab 不接管,留作字面 Tab 字符
+
+- **`/plan` / `/do` 严格动词**
+  - 任何 args 静默忽略,只切 `plan_mode` (True / False)
+  - 这是与 v0.6 的关键差别:之前 `/plan foo bar` 会同时跑任务,
+    现在只切模式,任务由用户单独发(`/do foo bar` 也已不再支持 — 任务是普通消息)
+
+- **状态栏 mode marker**
+  - `[DEFAULT]` / `[PLAN]` / `[STRICT]` / `[PERMISSIVE]` — 一眼看到当前 mode
+  - 替换 v0.5-v0.6 状态栏的 `mode=plan / mode=full · perm_mode=default` 多段
+
+- **`CommandsConfig.review_prompt`** — 配置项
+  - `config.commands.review_prompt: str | None`,为 `None` 用 builtin 默认文本
+  - 模板字符串含 `{since}` 占位符,运行时被 `/review <since>` 替换
+  - 给高级用户覆盖默认 review prompt 的口子
+
+### 修改能力
+
+- `baozicode/tui/chat_screen.py` 删 16 命令 if/elif 树(`SLASH_COMMANDS` + `_handle_slash`)
+- `baozicode/commands/__init__.py` 导出 `dispatch / build_builtin_defs / CommandRegistry / CommandContext`
+- `BaoZiCodeApp._command_registry` 字段在 `__init__` 构造(空),
+  ChatScreen.on_mount 时注入 10 个 handler 并 `freeze()`
+- `BaoZiCodeApp._command_ctx` 字段由 ChatScreen 注入(`TextualCommandContext` 实现)
+- `baozicode/config/schema.py` 新增 `CommandsConfig` 字段(`review_prompt`)
+- 测试增量:+103(v0.8 705 → v0.9 808)
+
+### 废弃/移除字段
+
+- **`/exit /model /tools /mcp /stop /auto` 6 个旧命令**:
+  - `/exit` → `Ctrl+C` 退出(App 上 `BINDINGS` 已有)
+  - `/model` → 改 `config.yaml` 重启;banner 写明当前后端 + 模型
+  - `/tools` → 合并进 `/status` (列出可用工具摘要)
+  - `/mcp` → 启动时 stderr banner 输出 MCP server 状态;不再单独命令
+  - `/stop` → `Ctrl+C` 在运行中 + v0.7 agent cancel hook
+  - `/auto` → 等价 `/permission mode permissive`;L5 modal 内部行为不变
+- **`/resume /new` 合并入 `/session`**:`/session` 现在是单一入口,弹 StartupSessionScreen
+  让用户选"恢复某 sid" / "开新" / "取消"
+
+### 升级路径
+
+- **最小动作**:不动配置也能跑,`CommandsConfig` 默认 `review_prompt=None` 用 builtin 默认
+- **推荐动作**:`/help` 查看 10 个内置命令;旧的 6 杂事命令全部有迁移路径
+- **可选动作**:`config.commands.review_prompt` 覆盖默认 /review prompt,自定义审查模板
+
+详见 [docs/migrations/v0.8-to-v0.9.md](docs/migrations/v0.8-to-v0.9.md)。
+
 ## [v0.8] — 2026-07
 
 ### 新增能力

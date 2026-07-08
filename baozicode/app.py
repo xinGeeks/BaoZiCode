@@ -125,6 +125,11 @@ class BaoZiCodeApp(App):
         self.pending_session_selection: bool = pending_session_selection
         self.resume_target: str | None = resume_target
 
+        # ---- v0.9:command registry(空,frozen 等 ChatScreen 注入 handler)----
+        from baozicode.commands.registry import CommandRegistry
+        self._command_registry: CommandRegistry | None = CommandRegistry()
+        self._command_ctx = None  # 由 ChatScreen 注入
+
     def on_mount(self) -> None:
         # v0.8:CLI 启动时若要求弹 session 选择器,先在 ChatScreen 之前 push
         if self.resume_target is not None:

@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-0.8.0-blue)
+![version](https://img.shields.io/badge/version-0.9.0-blue)
 
 ## 是什么
 
@@ -34,13 +34,21 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
     Agent 自然停下后异步调 LLM 抽取,`MEMORY.md` 索引(200 行 / 25KB)灌进 system prompt,
     溢出三级分层(NORMAL → WARN → AUTO_COMPRESS → HUMAN_NEEDED)
 
-## 当前版本：v0.8
+## 当前版本：v0.9
+
+- ✅ **Slash 命令注册中心**(`baozicode/commands/`)
+  - 10 个内置命令:`/help /compact /clear /plan /do /session /memory /permission /status /review`
+  - 元数据集中:`CommandDef(name/aliases/description/usage/type/handler...)`
+  - 启动时 `freeze()` 别名冲突 → SystemExit(boot panic,不延迟到运行)
+  - 大小写不敏感 + 实时 Tab 补全
+  - 3 类执行模式(LOCAL / UI_STATE / PROMPT) + `narrow CommandContext` 接口
+  - 状态栏 mode marker:`[DEFAULT] / [PLAN] / [STRICT] / [PERMISSIVE]`
 
 - ✅ 7 个工具 + `side_effect` 标记(`Plan B` 并发调度 + `Plan C` 扩展点)
 - ✅ **Agent Loop** — 7 种 `AgentEvent`(text / tool_call / tool_result / usage / progress / done / error)
 - ✅ **StreamCollector** — 双路收集:TUI 实时收 text,Agent 决策看 TurnSnapshot 完整源
 - ✅ **三层 stop guards** — unknown_tool / deny_threshold / failed_loop
-- ✅ **Plan Mode** — `/plan` 只开放 4 个只读工具,`/do` 切回全工具
+- ✅ **Plan Mode** — `/plan` 只开放 4 个只读工具,`/do` 切回全工具(严格动词)
 - ✅ **7 停止条件** — COMPLETED / MAX_ITERATIONS_REACHED / USER_CANCELLED /
   UNKNOWN_TOOL_HALLUCINATION / DENIALS_EXCEEDED / FAILED_TOOL_LOOP / STREAM_ERROR
 - ✅ **Token 用量追踪** — per-turn + session total,Anthropic 走 `message_delta.usage`,
@@ -187,28 +195,28 @@ python -m baozicode                # 等价
 [BaoZiCode] 会话: 7 sessions found, latest: 20260101-120000-abcd (旧对话)
 ```
 
-## 斜杠命令
+## 斜杠命令(v0.9 重写 — `baozicode/commands/` 注册中心)
 
-| 命令 | 说明 |
-|------|------|
-| `/help` | 显示可用命令 |
-| `/clear` | 清空对话历史 + session 用量 |
-| `/exit` | 退出（Ctrl+C 同样有效） |
-| `/model` | 切换到另一后端 |
-| `/tools` | 列出 7 个工具（含 side_effect 标记） |
-| `/permissions` | 显示当前生效的权限配置（五层防御版本） |
-| `/permissions mode` | 切换权限模式（strict / default / permissive） |
-| `/plan [task]` | 进入 plan mode（只读工具）+ 可选运行任务 |
-| `/do [task]` | 退出 plan mode（全工具）+ 可选运行任务 |
-| `/auto` | 切换 auto 模式（跳过本会话所有 Modal） |
-| `/stop` | 取消正在运行的 Agent（Esc / Ctrl+C 同效） |
-| `/status` | 显示 mode / backend / model / token 累计 + session_id + memory 摘要 |
-| `/mcp` | 查看 MCP server 状态（v0.6） |
-| `/mcp reconnect <name>` | 重连指定 MCP server |
-| `/compact` | 手动触发上下文压缩（v0.7：Layer 1 offload + Layer 2 摘要） |
-| `/resume` | 列已有 sessions,选一个续接（v0.8） |
-| `/memory` | 查看 user / project 两层 memory 状态（v0.8） |
-| `/new` | 归档当前 session,开新（v0.8） |
+| 命令 | 类型 | 说明 |
+|------|------|------|
+| `/help` | LOCAL | 列出 10 个内置命令,描述 + usage |
+| `/clear` | UI_STATE | 清空对话历史 + session 用量 |
+| `/compact` | UI_STATE | 手动触发上下文压缩(v0.7:Layer 1 offload + Layer 2 摘要) |
+| `/plan` | UI_STATE | **严格动词**:切 plan_mode=True(args 静默忽略) |
+| `/do` | UI_STATE | **严格动词**:切 plan_mode=False(args 静默忽略) |
+| `/session` | UI_STATE | 弹 StartupSessionScreen 选:恢复某 sid / 开新 / 取消 |
+| `/memory` | LOCAL | 查看 user / project 两层 memory 状态 |
+| `/permission [mode]` | UI_STATE | 显示当前或切换 strict / default / permissive |
+| `/status` | LOCAL | mode + backend + token 累计 + session_id + memory 摘要 |
+| `/review [<since>]` | PROMPT | 让 Agent 审查自 `{since}` 起的改动,默认 `"本次会话开始"` |
+
+**别名**:`/permissions` = `/permission`(兼容 v0.5-v0.6 拼写)。
+
+**v0.9 删除命令迁移**:`/exit` → `Ctrl+C` /
+`/model` → 改 config 重启 / `/tools` → 合并入 `/status` /
+`/mcp` → 启动 banner 看状态 / `/stop` → `Ctrl+C` /
+`/auto` → `/permission mode permissive` /
+`/resume` `/new` → 合入 `/session`。
 
 **Plan Mode 典型工作流**:
 ```

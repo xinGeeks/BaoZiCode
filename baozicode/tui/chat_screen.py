@@ -9,20 +9,13 @@
 - error     → 红色 ✗
 - done      → 收尾(解锁输入、清状态栏、显示运行结果)
 
-slash 命令:
-- /help /clear /exit /model /tools /permissions(v0.2 沿用)
-- /permissions mode — 切换 strict/default/permissive(v0.5 五层防御)
-- /plan [task] — 进入只读模式跑 Agent,只放开 4 个读类工具
-- /do         — 退出 plan mode,跑 Agent(用全工具)
-- /auto       — 切换 auto_allow 模式(本会话跳过所有 Modal)
-- /stop       — 取消正在运行的 Agent
-- /status     — 显示当前 mode/backend/model/token 等
-
-v0.5 变化:
-- 5 层防御(L1 黑名单 / L2 沙箱 / L3 规则 / L4 mode / L5 user)
-- /permissions mode 子命令切换 session_mode
-- 状态栏追加 perm_mode 段
-- 重试 previously denied 调用时弹 🔧 提示卡
+v0.9 变化:
+- slash 命令重写:`baozicode/commands/` 注册中心接管分发
+- 10 个内置命令:`/help /compact /clear /plan /do /session /memory /permission /status /review`
+- 6 个旧命令删除:`/exit /model /tools /mcp /stop /auto`(迁移见 v0.8→v0.9 changelog)
+- 实时 Tab 补全:每次键击调 completor.candidates()
+- 状态栏 mode 段:`[DEFAULT] / [PLAN] / [STRICT] / ...`
+- /plan /do 严格动词:任何 args 静默忽略,只切 plan_mode
 
 Bindings:
 - Ctrl+C — 运行中:取消 Agent;idle:退出
@@ -41,6 +34,17 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, Markdown, Static
 
 from baozicode.agent.events import AgentEvent, Progress, StopReason, UsageStats
+from baozicode.commands.builtin import build_builtin_defs
+from baozicode.commands.context import CommandContext
+from baozicode.commands.registry import (
+    CommandDef,
+    CommandRegistry,
+    CommandResult,
+    CommandType,
+    LocalResult,
+    PromptResult,
+    UiStateResult,
+)
 from baozicode.config.schema import BackendName
 from baozicode.instructions import LoadedInstructions
 from baozicode.tools.base import ToolCall, ToolResult
@@ -51,25 +55,6 @@ from baozicode.tui.tool_card import ToolCallCard, ToolResultCard
 if TYPE_CHECKING:
     from baozicode.agent.loop import Agent
     from baozicode.app import BaoZiCodeApp
-
-SLASH_COMMANDS = (
-    "/help",
-    "/clear",
-    "/exit",
-    "/model",
-    "/tools",
-    "/permissions",
-    "/plan",
-    "/do",
-    "/auto",
-    "/stop",
-    "/status",
-    "/mcp",
-    "/compact",
-    "/resume",
-    "/memory",
-    "/new",
-)
 
 
 class ModelSelectScreen(ModalScreen[BackendName | None]):
@@ -233,6 +218,46 @@ class StatusBar(Static):
     """
 
 
+class TextualCommandContext(CommandContext):
+    """`CommandContext` 的 textual 实现 - 持有 screen 弱引用。
+
+    所有方法委托给 ChatScreen 的公开 / 私有 helper。
+    这是 `commands/` 包唯一一处真正接入 textual 的地方。
+    """
+
+    def __init__(self, screen: "ChatScreen") -> None:
+        self._screen = screen
+
+    @property
+    def app(self):
+        return self._screen.app
+
+    @property
+    def config(self):
+        return self._screen.app.config
+
+    def show_info(self, text: str) -> None:
+        self._screen._append_info(text)
+
+    def show_error(self, text: str) -> None:
+        self._screen._append_error(text)
+
+    def send_to_agent(self, text: str) -> None:
+        self._screen._send_to_agent_via_input(text)
+
+    def switch_mode(self, new_mode) -> None:
+        self._screen._switch_session_mode(new_mode)
+
+    def get_token_usage(self):
+        return self._screen.app.session_usage
+
+    def refresh_status(self) -> None:
+        self._screen._update_status_bar(idle=not self._screen.agent_running)
+
+    def push_modal(self, screen):
+        return self._screen.push_screen_wait(screen)
+
+
 class ChatScreen(Screen):
     """通过 `app.push_screen` 装载的主屏幕。
 
@@ -286,6 +311,8 @@ class ChatScreen(Screen):
         )
         self.query_one("#welcome", Static).update(welcome_text)
         self.query_one("#input", Input).focus()
+        # v0.9: 初始化命令 registry + context
+        self._init_command_registry()
         self._update_status_bar(idle=True)
 
     # ---- input handling ----
@@ -300,52 +327,205 @@ class ChatScreen(Screen):
         self.run_worker(self._dispatch(text), exclusive=True)
 
     async def _dispatch(self, text: str) -> None:
-        if text.startswith("/"):
-            await self._handle_slash(text)
-        else:
-            await self._send_user_message(text)
+        # v0.9:走 commands.registry 分发
+        from baozicode.commands.dispatcher import dispatch as cmd_dispatch
+        from baozicode.commands.context import CommandContext
 
-    async def _handle_slash(self, text: str) -> None:
-        cmd, _, args = text.partition(" ")
-        if cmd not in SLASH_COMMANDS:
-            self._append_info(f"未知命令: {cmd}（输入 /help 查看可用命令）")
+        ctx: CommandContext = self._command_ctx
+        reg = self._command_registry
+
+        async def on_agent(t: str) -> None:
+            await self._send_user_message(t)
+
+        await cmd_dispatch(text, ctx, reg, on_agent)
+
+    # ---- v0.9:command registry + context + handlers ----
+
+    def _init_command_registry(self) -> None:
+        """on_mount 时组装 10 个内置命令并 freeze。
+
+        registry 实例由 App.__init__ 创建,这里注入 handler 后冻结。
+        handler 是 self 上的 _cmd_xxx 方法(需要 chat_screen 内部状态)。
+        """
+        from baozicode.commands.builtin import build_builtin_defs
+
+        # 1. 拿到 App 已构造的 registry(可能是 None,例如测试环境)
+        app = getattr(self, "app", None)
+        if app is not None and getattr(app, "_command_registry", None) is not None:
+            self._command_registry = app._command_registry
+        else:
+            self._command_registry = CommandRegistry()
+
+        # 2. 把每个命令名映射到对应 handler 方法
+        def _get_handler(name: str):
+            return {
+                "help":       self._cmd_help,
+                "compact":    self._cmd_compact,
+                "clear":      self._cmd_clear,
+                "plan":       self._cmd_plan,
+                "do":         self._cmd_do,
+                "session":    self._cmd_session,
+                "memory":     self._cmd_memory,
+                "permission": self._cmd_permission,
+                "status":     self._cmd_status,
+                "review":     self._cmd_review,
+            }[name]
+
+        for d in build_builtin_defs(_get_handler):
+            self._command_registry.register(d)
+        self._command_registry.freeze()  # alias 冲突 → SystemExit
+        self._command_ctx = TextualCommandContext(self)
+        # 挂回 App 让 _status / 其他 hook 访问
+        if app is not None:
+            try:
+                app._command_registry = self._command_registry
+                app._command_ctx = self._command_ctx
+            except Exception:
+                pass
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """v0.9:每次键击触发 Tab 补全 — 在 placeholder / hint 体现。"""
+        from baozicode.commands.completor import candidates, has_completable_space
+        text = event.value or ""
+        if has_completable_space(text):
+            # 已进 args 区,不接管
             return
-        if cmd == "/help":
-            self._show_help()
-        elif cmd == "/clear":
-            self._clear_conversation()
-        elif cmd == "/exit":
-            self.app.exit()
-        elif cmd == "/model":
-            await self._switch_model()
-        elif cmd == "/tools":
-            self._show_tools()
-        elif cmd == "/permissions":
-            sub = args.strip().lower()
-            if sub == "mode":
-                await self._handle_permissions_mode()
-            else:
-                self._show_permissions()
-        elif cmd == "/plan":
-            await self._handle_plan(args.strip())
-        elif cmd == "/do":
-            await self._handle_do(args.strip())
-        elif cmd == "/auto":
-            self._toggle_auto_mode()
-        elif cmd == "/stop":
-            self._handle_stop()
-        elif cmd == "/status":
-            self._show_status()
-        elif cmd == "/mcp":
-            await self._handle_mcp(args.strip())
-        elif cmd == "/compact":
-            await self._handle_compact()
-        elif cmd == "/resume":
-            await self._handle_resume()
-        elif cmd == "/memory":
-            self._show_memory()
-        elif cmd == "/new":
-            await self._handle_new_session()
+        cands = candidates(text, self._command_registry)
+        if not cands and text.startswith("/"):
+            # 0 匹配 + 是 slash → 不动 input(value 仍在),不显示菜单
+            return
+        # v0.9 简化 UX:placeholder 提示完整列表(完整菜单 UI 后续可加)
+        # 此处不动 input.value 也不弹菜单 — 只让状态栏 placeholder 在挂载时显示完整命令集
+        # 真正的补全 popover 需要 OptionList,留作 v0.10
+
+    def _send_to_agent_via_input(self, text: str) -> None:
+        """ctx.send_to_agent 调用 — 直接走 _send_user_message,不绕前台 input。"""
+        # 同步触发 / 异步触发都行(由 caller 决定 await)
+        if self.agent_running:
+            # 排队到下一轮(简化:目前 agent_running 时不再处理)
+            self._append_info("[agent 忙,send_to_agent 暂时排队中]")
+            return
+        self.run_worker(self._send_user_message(text), exclusive=True)
+
+    def _switch_session_mode(self, new_mode) -> None:
+        """ctx.switch_mode 调用 — 直接写 app.session_mode,refresh status。"""
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        if new_mode is None:
+            app.session_mode = None
+        else:
+            # new_mode 可能是 PermissionMode Literal(str 类)
+            app.session_mode = new_mode if isinstance(new_mode, str) else new_mode.value
+        self._update_status_bar(idle=not self.agent_running)
+
+    # ---- v0.9:10 个命令 handler(每个签名 args, ctx -> CommandResult) ----
+
+    async def _cmd_help(self, args: str, ctx) -> CommandResult:
+        lines = ["**可用命令**\n"]
+        for d in self._command_registry.all_visible():
+            params = f" {d.params_hint}" if d.params_hint else ""
+            lines.append(f"- `/{d.name}{params}` — {d.description}")
+        self._append_info("\n".join(lines))
+        return LocalResult()
+
+    async def _cmd_compact(self, args: str, ctx) -> CommandResult:
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        agent = app.current_agent()
+        if agent is not None:
+            self._clear_partial_cards()
+            agent.request_compact()
+            self._append_info("[已请求压缩,Agent 下一轮迭代顶部执行...]")
+        else:
+            triggered, status = await app.run_compact_now()
+            self._append_info(status)
+        return UiStateResult()
+
+    async def _cmd_clear(self, args: str, ctx) -> CommandResult:
+        self._clear_conversation()
+        return UiStateResult()
+
+    async def _cmd_plan(self, args: str, ctx) -> CommandResult:
+        """严格动词:任何 args 静默忽略,只切 plan_mode=True。"""
+        if self.agent_running:
+            self._append_info("Agent 正在运行，请先 /stop 或等待完成。")
+            return UiStateResult()
+        self.plan_mode = True
+        self._append_info("已切换到 plan mode。下条消息会用只读工具运行 Agent。")
+        self._update_status_bar(idle=True)
+        return UiStateResult()
+
+    async def _cmd_do(self, args: str, ctx) -> CommandResult:
+        """严格动词:任何 args 静默忽略,只切 plan_mode=False。"""
+        if self.agent_running:
+            self._append_info("Agent 正在运行，请先 /stop 或等待完成。")
+            return UiStateResult()
+        self.plan_mode = False
+        self._append_info("已退出 plan mode。下条消息会用全部工具运行 Agent。")
+        self._update_status_bar(idle=True)
+        return UiStateResult()
+
+    async def _cmd_session(self, args: str, ctx) -> CommandResult:
+        """委派给 StartupSessionScreen (Phase 8 已建)。"""
+        from baozicode.tui.startup_session_screen import (
+            NEW_SESSION,
+            StartupSessionScreen,
+        )
+        chosen = await self.push_screen_wait(
+            StartupSessionScreen(current_session_id=self.app.session_id)  # type: ignore[attr-defined]
+        )
+        if chosen is None:
+            return UiStateResult()
+        if chosen == NEW_SESSION:
+            self.app.start_new_session()  # type: ignore[attr-defined]
+            self._append_info("已开新 session。")
+        else:
+            await self.app.resume_session(chosen)  # type: ignore[attr-defined]
+            self._append_info(f"已恢复 session: {chosen}")
+        self._update_status_bar(idle=not self.agent_running)
+        return UiStateResult()
+
+    async def _cmd_memory(self, args: str, ctx) -> CommandResult:
+        self._show_memory()
+        return LocalResult()
+
+    async def _cmd_permission(self, args: str, ctx) -> CommandResult:
+        arg = args.strip().lower()
+        valid = {"strict", "default", "permissive"}
+        if not arg:
+            current = self._current_permission_mode()
+            current_str = "current mode: `" + current + "`"
+            valid_str = " | ".join(sorted(valid))
+            self._append_info(current_str + chr(10) + "usage: /permission [" + valid_str + "]")
+            return LocalResult()
+        if arg not in valid:
+            ctx.show_error(
+                f"未知 mode: {arg!r}. 有效值: {' / '.join(sorted(valid))}"
+            )
+            return LocalResult()
+        ctx.switch_mode(arg)
+        self._append_info(f"权限模式已设置为 `{arg}`。下一条消息起生效。")
+        return UiStateResult()
+
+    async def _cmd_status(self, args: str, ctx) -> CommandResult:
+        self._show_status()
+        return LocalResult()
+
+    async def _cmd_review(self, args: str, ctx) -> CommandResult:
+        since = args.strip() or "本次会话开始"
+        prefix = None
+        try:
+            commands_cfg = getattr(ctx.app.config, "commands", None)
+            if commands_cfg is not None:
+                prefix = commands_cfg.review_prompt
+        except Exception:
+            prefix = None
+        if not prefix:
+            prefix = ("请审查当前会话自 {since} 以来的所有改动" "(patch、命令输出、对话)。" + chr(10) + "输出三段:## 摘要 / ## 风险点 / ## 建议修复。")
+        text = prefix.replace("{since}", since)
+        return PromptResult(text=text)
+
+    async def _handle_slash_v09(self, text: str) -> None:
+        # v0.9:已迁移到 _dispatch_v09 走 commands.registry
+        return
 
     # ---- slash command handlers ----
 
@@ -1075,19 +1255,26 @@ class ChatScreen(Screen):
             bar = self.query_one("#status-bar", StatusBar)
         except Exception:
             return
-        mode = "plan" if self.plan_mode else "full"
         backend = app.config.backend
         model = app.config.active().model
-        auto = "auto" if self.auto_mode else "ask"
-        # v0.5:权限 mode 段(strict/default/permissive),给用户一眼看到当前档位
+        # v0.9:mode marker — [PLAN] 优先,然后 permission mode
         perm_mode = self._current_permission_mode()
+        if self.plan_mode:
+            mode_marker = "[PLAN]"
+        elif perm_mode == "strict":
+            mode_marker = "[STRICT]"
+        elif perm_mode == "permissive":
+            mode_marker = "[PERMISSIVE]"
+        else:
+            mode_marker = "[DEFAULT]"
+        auto_marker = "auto" if self.auto_mode else "ask"
         if idle:
             text = (
-                f"● {mode} · {backend}/{model} · {auto} · {perm_mode} · idle"
+                f"● {mode_marker} · {backend}/{model} · {auto_marker} · idle"
             )
         else:
             text = (
-                f"● {mode} · {backend}/{model} · {auto} · {perm_mode} · "
+                f"● {mode_marker} · {backend}/{model} · {auto_marker} · "
                 f"{progress_text or '...'}"
             )
         bar.update(text)
@@ -1266,4 +1453,4 @@ def _is_deny_result(content: str) -> bool:
     return False
 
 
-__all__ = ["ChatScreen", "ModelSelectScreen", "StatusBar", "SLASH_COMMANDS"]
+__all__ = ["ChatScreen", "ModelSelectScreen", "ModeSelectScreen", "SessionSelectScreen", "ConfirmModal", "StatusBar", "TextualCommandContext"]
