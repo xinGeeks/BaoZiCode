@@ -2,6 +2,58 @@
 
 BaoZiCode 所有重要变更记录在此。版本号遵循 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。
 
+## [v1.0] — 2026-07
+
+### 新增能力
+
+- **Skill 系统**(`baozicode/skills/`)
+  - 把可复用 AI 操作封装成独立 Markdown 文件 + YAML frontmatter
+  - 三级存放(项目 > 用户 > 内置),同名按优先级覆盖,单个文件解析失败不阻断
+  - 两阶段加载:启动时名字 + 一句话说明,要用时调 `load_skill` 工具按需加载完整 SOP
+  - 两种执行模式:`shared`(共享当前对话,结果留主历史)/ `independent`(开子对话
+    跑完摘要回流,可带 `history-bubbles` 条历史)
+  - 工具白名单双层防御:`allowed-tools` 启动期 L1 校验(不存在即 panic)+ 运行时
+    L2 收窄(命中 union 放行,未命中拒);`load_skill` 自身是 system 工具,不受白名单约束
+  - 激活 Skill 的 body 钉在每轮 env 上下文最顶部的 `<system-reminder type="active_skills">`,
+    多 Skill 并行激活,正文按 load 顺序拼接
+  - 启动时自动注册为 `/skill` 短命令(`/skill list` / `/skill <name> [args]` / `/skill clear`),
+    改动 SKILL.md 后 `registry.reload(name)` 立即生效
+  - `/clear` 同步清空已激活 Skill
+  - 占位符替换:`{var}` 和 `{var:default}` 在激活时用 args 替换
+  - 目录型 Skill(整个 `<name>/` 目录作为能力包分发):入口 SKILL.md + 模板/示例/脚本
+    都可以一起打包,frontmatter 只描述入口
+
+- **3 个内置 Skill**
+  - `commit` — `mode: shared`, `allowed-tools: [Bash, Read]` —
+    根据 `git diff --staged` 生成 conventional commit message 并执行 commit
+  - `review` — `mode: independent`, `allowed-tools: [Bash, Read, Grep]`,
+    `history-bubbles: 3` — 子对话审查自 `{since}` 起的改动,三段报告(摘要/风险/建议)
+  - `test` — `mode: independent`, `allowed-tools: [Bash]`,
+    `history-bubbles: 2` — 子对话跑 pytest,失败根因分析回流
+
+- **`SkillsConfig` 配置块**(`config.yaml`)
+  - `enabled` / `builtin_dir` / `user_dir` / `project_dir` / `summary_model` /
+    `history_bubbles_default`,整个块可省略
+  - `enabled: false` → 整套系统空集,prompt section 也不出现「可用 Skill」段
+  - `AppConfig.skills: SkillsConfig | None`,默认 None 走 bootstrap 默认
+
+- **v0.4 兼容**
+  - 旧 `skills_dir` 字段仍被 `prompt/sections/skills.py` 识别 — 若未传
+    `skill_registry`(例如测试或外部调用),section 退回 v0.4 旧路径(扫
+    `skills_dir/*.md`),标题保留「已激活 Skill」
+  - 现有 `commit` / `review` / `test` 3 个老 `.md` 文件被自动识别,无需迁移
+
+- **测试覆盖**:1018 个测试全部通过(+12 个 v1.0 e2e + 17 个 v1.0 SkillsConfig
+  + 5 个 Skills 注入 + 7 个 App 集成 + P1-P7 各模块单元测试)
+
+### 兼容性
+
+- **完全向后兼容** v0.9 — 无 breaking change
+- 旧 `skills_dir` 字段(单层目录放 `.md` 文件)仍能渲染,不传 `skill_registry`
+  时自动走 fallback
+- 11 个老 slash 命令不变;`/skill` 是新增第 12 个
+- 启动 banner 在有 builtin Skill 时多一行:`[Skill] X 个可用 (commit, review, test)`
+
 ## [v0.9] — 2026-07
 
 ### 新增能力

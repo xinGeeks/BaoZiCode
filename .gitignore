@@ -26,3 +26,4 @@ htmlcov/
 .baozicode/memory/
 # 残留测试夹具(早期 smoke test 误生成)
 MagicMock/
+tests/skills/.baozicode/

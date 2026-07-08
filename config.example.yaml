@@ -296,3 +296,45 @@ deepseek:
 #     url: https://mcp.example.com/v1
 #     headers:
 #       Authorization: "Bearer ${REMOTE_MCP_TOKEN}"
+
+# Skill 系统配置(v1.0 新增;整个块可省略,省略时走全部默认)
+#
+# Skill = 可复用 AI 操作的 Markdown 文件 + YAML frontmatter。Agent 启动时只看
+# 名字 + 一句话说明,要用时调 load_skill 工具按需加载完整 SOP,激活后正文会
+# 钉在每轮对话 env 上下文顶部。
+#
+# 字段:
+# - enabled:是否启用 Skill 系统;设 false → 不扫描任何目录,prompt section
+#   也不出现「可用 Skill」段(默认 true)
+# - builtin_dir:内置 Skill 目录;默认 <pkg>/skills/builtin(始终有内容)
+# - user_dir:用户级 Skill 目录;默认 ~/.config/baozicode/skills
+# - project_dir:项目级 Skill 目录;默认 <project_root>/.baozicode/skills
+#   三级优先级:project > user > builtin,同名 Skill 高优先级覆盖低优先级。
+# - summary_model:v1.1 计划 — 独立模式 Skill 摘要时用的模型;省略走主后端
+# - history_bubbles_default:v1.1 计划 — 独立模式默认带几条历史气泡;默认 0
+#
+# 不想用 Skill 系统(退回 v0.9 行为):enabled: false
+# skills:
+#   enabled: true
+#   # 想把 Skill 集中放别处:
+#   # builtin_dir: /opt/baozicode/skills
+#   # user_dir: ~/my-skills
+#   # project_dir: ./team-skills
+#
+# Skill 文件格式示例(写在 <上述任一目录>/<skill-name>/SKILL.md):
+# ---
+# name: commit
+# description: 根据当前 git diff 生成符合 conventional commits 的 commit message
+# mode: shared
+# allowed-tools: [Bash, Read]
+# ---
+# 根据当前 `git diff --staged` 生成一个符合 conventional commits 规范的 commit
+# message,并自动 `git commit -m "<message>"`。
+# ## SOP
+# 1. 调 Bash 跑 `git diff --staged --stat` 看改动概览
+# 2. 调 Bash 跑 `git diff --staged` 看完整 diff
+# 3. 归纳改动 → 生成 commit message
+# 4. 调 Bash 跑 `git commit -m "<subject>"`
+#
+# frontmatter 字段(name / description / mode / allowed-tools / history-bubbles
+# / model)见 docs/migrations/v0.9-to-v1.0.md 完整说明。

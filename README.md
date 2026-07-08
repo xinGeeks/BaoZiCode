@@ -34,10 +34,28 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
     Agent 自然停下后异步调 LLM 抽取,`MEMORY.md` 索引(200 行 / 25KB)灌进 system prompt,
     溢出三级分层(NORMAL → WARN → AUTO_COMPRESS → HUMAN_NEEDED)
 
-## 当前版本：v0.9
+## 当前版本：v1.0
+
+- ✅ **Skill 系统(v1.0 新增)** — `baozicode/skills/`
+  - 把可复用 AI 操作封装成独立 Markdown 文件 + YAML frontmatter,3 个内置
+    (`commit` / `review` / `test`),三级存放 project > user > builtin
+  - **两阶段加载**:启动时 system prompt 只列名字 + 一句话说明,要用时
+    LLM 调 `load_skill` 工具按需加载完整 SOP(body 替换占位符后钉进
+    `<system-reminder type="active_skills">` 顶部,每轮重建都在)
+  - **两种执行模式**:`shared`(共享当前对话,结果留主历史)/ `independent`
+    (开子对话跑完摘要回流,可带 `history-bubbles` 条历史)
+  - **工具白名单双层防御**:`allowed-tools` 启动期 L1 校验存在性(不存在即 panic)
+    + 运行时 L2 收窄到 union(命中放行,未命中拒);`load_skill` 是 system 工具,
+    永远放行
+  - **`/skill` slash 命令**:`/skill list` / `/skill <name> [args]` / `/skill clear`,
+    加载后自动注册同名短命令;`/clear` 同步清空已激活;改 SKILL.md 后
+    `registry.reload(name)` 立即生效
+  - **SkillsConfig** 整块可省略,`enabled: false` 退回 v0.9 行为;v0.4 老
+    `skills_dir` 单文件路径作为 fallback 保留(无破坏性)
+  - 详细迁移 + 完整示例见 `docs/migrations/v0.9-to-v1.0.md`
 
 - ✅ **Slash 命令注册中心**(`baozicode/commands/`)
-  - 10 个内置命令:`/help /compact /clear /plan /do /session /memory /permission /status /review`
+  - 11 个内置命令:`/help /compact /clear /plan /do /session /memory /permission /status /review /skill`
   - 元数据集中:`CommandDef(name/aliases/description/usage/type/handler...)`
   - 启动时 `freeze()` 别名冲突 → SystemExit(boot panic,不延迟到运行)
   - 大小写不敏感 + 实时 Tab 补全
@@ -199,8 +217,8 @@ python -m baozicode                # 等价
 
 | 命令 | 类型 | 说明 |
 |------|------|------|
-| `/help` | LOCAL | 列出 10 个内置命令,描述 + usage |
-| `/clear` | UI_STATE | 清空对话历史 + session 用量 |
+| `/help` | LOCAL | 列出 11 个内置命令,描述 + usage |
+| `/clear` | UI_STATE | 清空对话历史 + session 用量 + 已激活 Skill |
 | `/compact` | UI_STATE | 手动触发上下文压缩(v0.7:Layer 1 offload + Layer 2 摘要) |
 | `/plan` | UI_STATE | **严格动词**:切 plan_mode=True(args 静默忽略) |
 | `/do` | UI_STATE | **严格动词**:切 plan_mode=False(args 静默忽略) |
@@ -209,6 +227,7 @@ python -m baozicode                # 等价
 | `/permission [mode]` | UI_STATE | 显示当前或切换 strict / default / permissive |
 | `/status` | LOCAL | mode + backend + token 累计 + session_id + memory 摘要 |
 | `/review [<since>]` | PROMPT | 让 Agent 审查自 `{since}` 起的改动,默认 `"本次会话开始"` |
+| `/skill list\|<name> [args...]\|clear` | UI_STATE | 列出 / 加载并激活 / 清空已激活 Skill(v1.0) |
 
 **别名**:`/permissions` = `/permission`(兼容 v0.5-v0.6 拼写)。
 
@@ -237,6 +256,102 @@ python -m baozicode                # 等价
 - `Write` — 整文件覆写（自动创建父目录）
 - `Edit` — `old_string` 精确替换（必须唯一）
 - `Bash` — shell 命令（cwd 锁项目根，`cd` 在根内可跟随）
+
+**系统级（始终放行，不受白名单/Plan Mode 约束）**：
+- `load_skill` — v1.0 Skill 加载器，LLM 调它把 Skill body 钉进当前会话的 active_skills reminder
+
+## Skill 系统（v1.0）
+
+把可复用的 AI 操作封装成独立 Markdown 文件，模型按需加载而不是把 SOP 全部塞进 system prompt。完整迁移 + 字段表见 `docs/migrations/v0.9-to-v1.0.md`，这里给一份"看完能用"的浓缩版。
+
+**目录布局**
+
+```
+~/.config/baozicode/skills/<name>/SKILL.md    # 用户级（覆盖 builtin）
+<project>/.baozicode/skills/<name>/SKILL.md   # 项目级（最高优先级）
+<内置 commit / review / test 三件套>
+```
+
+三级同名 Skill 合并规则：**project > user > builtin**。整目录可作为"能力包"分发，除 `SKILL.md` 外可附带模板/示例/脚本。
+
+**SKILL.md 格式**
+
+```markdown
+---
+name: commit                              # 必填,小写字母+数字+连字符
+description: 根据 git diff 生成 commit    # 必填,启动期塞 system prompt
+mode: shared                               # shared(主对话) / independent(子对话)
+allowed-tools: [Bash, Read]                # 启动期 L1 校验存在性
+history-bubbles: 3                         # 独立模式带几条历史进子对话
+---
+根据 `git diff --staged` 生成 conventional commit message 并执行 commit。
+
+## SOP
+1. 调 `Bash` 跑 `git diff --staged --stat`
+2. 调 `Bash` 跑 `git diff --staged`
+3. 归纳改动 → 生成 commit message
+4. 调 `Bash` 跑 `git commit -m "<subject>"`
+
+## 占位符
+- `{area}` — 改动范围(必带)
+- `{since:HEAD~10}` — 默认值可不传
+```
+
+正文里 `{var}` / `{var:default}` 两种占位符在 `load_skill(name, args={...})` 时替换。
+
+**两阶段加载**
+
+```
+启动:  system prompt 注入 `## 可用 Skill(两阶段加载)`
+        列所有可见 Skill 的 name + description + 来源
+        (Body 不进 system prompt,保持 LLM 看到的内容轻)
+
+激活:  LLM 调 load_skill(name, args={...})
+        body 替换占位符 → 钉入 SkillActivation
+        同步注册同名 slash 短命令
+        返回 body 给 LLM(让模型看到完整 SOP)
+
+每轮:  Agent 重建 prompt,在 env reminder 后追加
+       <system-reminder type="active_skills">
+         ## /skill commit
+         <body 渲染结果>
+       </system-reminder>
+       多个激活 Skill 按 load 顺序拼接
+```
+
+**两种执行模式**
+
+| 模式 | 行为 | 适用 |
+|------|------|------|
+| `shared` | body 注入主对话,工具在主对话里调 | 短任务、与上下文耦合 |
+| `independent` | SkillLoader 调独立 runner(子 Agent),完成后摘要回流 | 长任务、需隔离上下文(审查/测试) |
+
+**工具白名单双层防御**
+
+- **L1 启动期**:`allowed-tools` 里写了不存在的工具 → `SystemExit`(boot panic)
+- **L2 运行期**:多个激活 Skill 的白名单取 **union**,命中放行,未命中拒
+- **`load_skill` 是 system 工具**(`tool_type="internal"`),**永远**放行,
+  即便 Skill 收窄到 `[Read]` 也能调
+
+**Slash 命令**(`/skill ...`)
+
+| 形态 | 行为 |
+|------|------|
+| `/skill list` | 列可见 Skill(name + description + 来源) |
+| `/skill <name> [args...]` | 加载并激活;args 形如 `key=value`,空格引号包裹 `key="value with spaces"` |
+| `/skill clear` | 清空所有已激活 |
+
+**配置**
+
+```yaml
+skills:
+  enabled: true                           # 整系统开关(默认 true)
+  builtin_dir: <pkg>/skills/builtin        # 默认,通常不动
+  user_dir: ~/.config/baozicode/skills     # 默认
+  project_dir: ./.baozicode/skills         # 默认
+```
+
+整块可省略;`enabled: false` → 整套空集 + 不注册 `load_skill` 工具,退回 v0.9。
 
 ## 权限系统（v0.5 五层防御）
 
@@ -373,6 +488,20 @@ baozicode/
 │   ├── reminder.py         # PlanModeReminder(节奏控制)
 │   ├── builder.py          # PromptBuilder.build() 一次构建多次复用
 │   └── sections/           # 11 个 section renderers(7 固定 + env_info + 3 可选)
+│                            #   v1.0:skills section 双路径(v1.0 registry / v0.4 fallback)
+├── skills/                 # v1.0 新增 — Skill 系统
+│   ├── schema.py           # SkillDef / SkillFrontmatter / SkillSource
+│   ├── registry.py         # SkillRegistry(三级 scan + priority merge + reload)
+│   ├── activation.py       # SkillActivation(render_active_section + clear)
+│   ├── loader.py           # SkillLoader(load_skill + 占位符替换 + L1 校验)
+│   ├── execution.py        # SkillExecutor(shared / independent runner 注入点)
+│   ├── whitelist.py        # SkillWhitelistFilter(L2 union + system 工具豁免)
+│   ├── bootstrap.py        # bootstrap_skills() + SkillSet 聚合
+│   ├── load_skill_tool.py  # load_skill tool 定义 + 执行器注册
+│   └── builtin/            # 3 个内置 Skill(目录形,可附带模板/脚本)
+│       ├── commit/SKILL.md # shared, allowed-tools: [Bash, Read]
+│       ├── review/SKILL.md # independent, history-bubbles: 3
+│       └── test/SKILL.md   # independent, history-bubbles: 2
 ├── tui/
 │   ├── chat_screen.py      # 主对话屏幕（订阅 Agent 事件流 + 11 slash 命令 + 状态栏）
 │   ├── tool_card.py        # ToolCallCard / ToolResultCard
