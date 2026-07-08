@@ -1,16 +1,51 @@
-"""已激活 Skill — 扫描 skills_dir/*.md。
+"""v1.0 Skills — 两阶段加载的「可用 Skill 列表」section。
 
-v0.4 还没 Skill 系统,扫到空目录返回空字符串,不报错。
+v0.4 行为:扫 `skills_dir/*.md`,把全文拼到 system prompt。
+v1.0 行为:只列 name + 一句话说明,正文(SOP)由 `load_skill` tool 按需加载。
+两阶段的好处:Skill 多时不撑爆 prompt,LLM 看到有合适的再主动 load。
+
+激活后的完整 body 由 `SkillActivation.render_active_section()` 输出为
+`<system-reminder type="active_skills">` 块,每轮 `_inject_reminders` 重
+建,优先级高于本 section。
+
+回退路径:
+- App 没挂 Skill 系统(测试 / SkillsConfig.enabled=False)→ 走 v0.4 旧路
+  (扫 `skills_dir` 下的 `*.md`,无文件返回空字符串)
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from baozicode.prompt.types import BuildContext
 
+if TYPE_CHECKING:
+    pass
+
 
 def render(ctx: BuildContext) -> str:
+    """两阶段 Skill 列表的「阶段一」section。
+
+    返回空字符串 → PromptBuilder 跳过此 section(节省 token)。
+    """
+    # 1. v1.0:优先用 SkillRegistry(由 App 注入到 ctx)
+    registry = getattr(ctx, "skill_registry", None)
+    if registry is not None:
+        visible = registry.list_visible()
+        if not visible:
+            return ""
+        lines: list[str] = ["## 可用 Skill(两阶段加载)\n"]
+        lines.append(
+            "以下 Skill 只列名字 + 一句话说明,要看完整 SOP 请调 "
+            "`load_skill(name=<skill>, args={<var>: <value>})` 加载。"
+        )
+        lines.append("")
+        for name, desc, source in visible:
+            lines.append(f"- `{name}` (来源: {source}) — {desc}")
+        return "\n".join(lines)
+
+    # 2. v0.4 回退路径:扫 `skills_dir/*.md`(保留兼容老配置)
     skills_dir = getattr(ctx.config, "skills_dir", None)
     if skills_dir is None:
         return ""

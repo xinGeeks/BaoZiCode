@@ -91,7 +91,7 @@ def test_parse_with_leading_slash_required() -> None:
 
 
 def _reg_with_builtins():
-    """构造 10 个命令注册好的 registry;除 review 返回 PromptResult 外其他返回 LocalResult。"""
+    """构造 11 个命令注册好的 registry(v1.0 +1:/skill);除 review 返回 PromptResult 外其他返回 LocalResult。"""
 
     async def _h_local(args, ctx):
         from baozicode.commands.registry import LocalResult
@@ -117,6 +117,7 @@ def _reg_with_builtins():
         "permission": _h_ui,
         "status": _h_local,
         "review": _h_review,
+        "skill": _h_local,
     }
     for d in build_builtin_defs(lambda n: handlers[n]):
         reg.register(d)
@@ -127,8 +128,8 @@ def _reg_with_builtins():
 def test_candidates_empty_returns_all() -> None:
     reg = _reg_with_builtins()
     out = candidates("", reg)
-    assert len(out) == 10
-    print(f"[OK] empty prefix → 10 candidates")
+    assert len(out) == 11
+    print(f"[OK] empty prefix → 11 candidates")
 
 
 def test_candidates_single_match_returns_one() -> None:

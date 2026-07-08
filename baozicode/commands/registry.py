@@ -83,7 +83,11 @@ class CommandRegistry:
         self._frozen: bool = False
 
     def register(self, def_: CommandDef) -> None:
-        """注册一条命令。freeze 后再 register 抛 RuntimeError。"""
+        """注册一条命令。freeze 后再 register 抛 RuntimeError。
+
+        v1.0 扩展:`register_dynamic()` 允许 freeze 后注册(Skill 动态挂载),
+        `unregister()` 允许移除(对应 Skill deactivate)。
+        """
         if self._frozen:
             raise RuntimeError(
                 f"registry 已 freeze,不能再 register 新命令: {def_.name!r}"
@@ -92,6 +96,52 @@ class CommandRegistry:
         for alias in def_.aliases:
             self._validate_name(alias)
         self._defs.append(def_)
+
+    def register_dynamic(self, def_: CommandDef) -> None:
+        """freeze 后也能注册(给 v1.0 Skill 动态挂载用)。
+
+        校验主名 + 别名不与已注册 def 撞名(不区分动态/静态来源)。
+        注册后立即可 lookup。
+        """
+        self._validate_name(def_.name)
+        for alias in def_.aliases:
+            self._validate_name(alias)
+        # 撞名校验
+        if def_.name in self._index:
+            raise ValueError(
+                f"动态注册失败: {def_.name!r} 已被占用"
+            )
+        for alias in def_.aliases:
+            if alias in self._index:
+                raise ValueError(
+                    f"动态注册失败: 别名 {alias!r} 已被占用"
+                )
+        self._defs.append(def_)
+        # freeze 状态下 _index 已有,直接追加
+        self._index[def_.name] = def_
+        for alias in def_.aliases:
+            self._index[alias] = def_
+
+    def unregister(self, name: str) -> bool:
+        """从 registry 移除命令(给 v1.0 Skill deactivate 用)。
+
+        Args:
+            name: 命令主名(小写,匹配 _index)
+
+        Returns:
+            True = 移除成功;False = name 不在 registry
+        """
+        key = name.lower()
+        if key not in self._index:
+            return False
+        def_ = self._index[key]
+        # 从 _defs 删
+        self._defs = [d for d in self._defs if d is not def_]
+        # 从 _index 删(主名 + 所有 alias)
+        del self._index[def_.name]
+        for alias in def_.aliases:
+            self._index.pop(alias, None)
+        return True
 
     def freeze(self) -> None:
         """冻结并校验:别名 + 主名撞名则 SystemExit 退出。

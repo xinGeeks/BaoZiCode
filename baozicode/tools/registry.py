@@ -83,11 +83,34 @@ class ToolRegistry:
         Raises:
             ValueError: 名字与内置工具冲突
         """
+        await self.register_tool(tool, executor, source_label="MCP")
+
+    async def register_tool(
+        self,
+        tool: ToolDefinition,
+        executor: Executor,
+        *,
+        source_label: str = "runtime",
+    ) -> None:
+        """注册一个运行时工具(MCP / 内部工具都用此入口)。
+
+        v1.0 新增:ToolDefinition 多了 `tool_type` 字段,但注册逻辑不区分类型——
+        统一走 `_mcp_tools` 这个 dict 存储,key 是 tool.name。`source_label` 仅
+        用于错误消息提示来源。
+
+        Raises:
+            ValueError: 名字与内置工具冲突,或已注册过同名 runtime tool
+        """
         async with self._lock:
             if tool.name in self._builtin_names:
                 raise ValueError(
-                    f"MCP tool name {tool.name!r} collides with built-in tool; "
-                    f"this registration is rejected to avoid masking built-ins."
+                    f"{source_label} tool name {tool.name!r} collides with "
+                    f"built-in tool; this registration is rejected to avoid "
+                    f"masking built-ins."
+                )
+            if tool.name in self._mcp_tools:
+                raise ValueError(
+                    f"{source_label} tool name {tool.name!r} already registered"
                 )
             self._mcp_tools[tool.name] = tool
             self._executors[tool.name] = executor
@@ -128,6 +151,11 @@ class ToolRegistry:
 _default = ToolRegistry()
 
 
+def get_default_tool_registry() -> ToolRegistry:
+    """返回模块级 ToolRegistry 单例 — v1.0 Skills bootstrap 用。"""
+    return _default
+
+
 def get_all_tools() -> list[ToolDefinition]:
     return _default.get_all_tools()
 
@@ -142,6 +170,19 @@ def get_tool_names() -> list[str]:
 
 async def register_mcp_tool(tool: ToolDefinition, executor: Executor) -> None:
     await _default.register_mcp_tool(tool, executor)
+
+
+async def register_tool(
+    tool: ToolDefinition,
+    executor: Executor,
+    *,
+    source_label: str = "runtime",
+) -> None:
+    """v1.0:通用 runtime tool 注册(MCP / 内部工具都用)。
+
+    `source_label` 仅用于错误消息提示注册来源。
+    """
+    await _default.register_tool(tool, executor, source_label=source_label)
 
 
 async def unregister_mcp_tools(names: list[str]) -> None:
@@ -180,9 +221,11 @@ __all__ = [
     "execute_tool",
     "execute_tool_call",
     "get_all_tools",
+    "get_default_tool_registry",
     "get_tool",
     "get_tool_names",
     "mcp_tool_names",
     "register_mcp_tool",
+    "register_tool",
     "unregister_mcp_tools",
 ]

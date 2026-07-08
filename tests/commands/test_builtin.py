@@ -48,6 +48,7 @@ def _make_handler_map() -> dict[str, object]:
         "permission": _noop_handler,
         "status": _noop_handler,
         "review": _noop_handler,
+        "skill": _noop_handler,
     }
 
 
@@ -61,25 +62,26 @@ def _getter(handlers: dict[str, object]):
 
 
 def test_register_all_freezes_cleanly() -> None:
-    """10 个命令注册 + freeze 不抛。"""
+    """11 个命令注册 + freeze 不抛(v1.0 +1:/skill)。"""
     reg = CommandRegistry()
     for d in build_builtin_defs(_getter(_make_handler_map())):
         reg.register(d)
     reg.freeze()
-    print("[OK] 10 builtins register + freeze cleanly")
+    print("[OK] 11 builtins register + freeze cleanly")
 
 
 def test_all_ten_resolvable() -> None:
-    """10 个主名都能查到。"""
+    """11 个主名都能查到。"""
     reg = CommandRegistry()
     for d in build_builtin_defs(_getter(_make_handler_map())):
         reg.register(d)
     reg.freeze()
     expected = {"help", "compact", "clear", "plan", "do",
-                "session", "memory", "permission", "status", "review"}
+                "session", "memory", "permission", "status", "review",
+                "skill"}
     found = {d.name for d in reg.all_visible()}
     assert found == expected, f"missing/extra: {expected ^ found}"
-    print(f"[OK] all 10 names resolvable: {sorted(found)}")
+    print(f"[OK] all 11 names resolvable: {sorted(found)}")
 
 
 def test_permissions_alias_resolves_to_permission() -> None:
@@ -114,6 +116,7 @@ def test_command_type_matrix() -> None:
         "permission": CommandType.UI_STATE,
         "status": CommandType.LOCAL,
         "review": CommandType.PROMPT,
+        "skill": CommandType.LOCAL,
     }
     for name, expected_type in expected_types.items():
         d = reg.lookup(name)
@@ -136,12 +139,12 @@ def test_no_builtins_hidden() -> None:
 
 
 def test_lookup_case_insensitive_for_builtins() -> None:
-    """大小写不敏感对所有 10 个命令工作。"""
+    """大小写不敏感对所有 11 个命令工作。"""
     reg = CommandRegistry()
     for d in build_builtin_defs(_getter(_make_handler_map())):
         reg.register(d)
     reg.freeze()
-    for name in ("HELP", "Compact", "STATUS", "ReViEw"):
+    for name in ("HELP", "Compact", "STATUS", "ReViEw", "Skill"):
         assert reg.lookup(name) is not None, f"case mismatch for {name}"
     print("[OK] case-insensitive lookup for builtins")
 
@@ -186,7 +189,7 @@ def test_no_duplicate_registration() -> None:
 
 
 def test_getter_invoked_once_per_name() -> None:
-    """get_handler 应该被调 10 次(每个 def 一次)。"""
+    """get_handler 应该被调 11 次(每个 def 一次)。"""
     calls: list[str] = []
 
     def _g(name: str):
@@ -194,10 +197,11 @@ def test_getter_invoked_once_per_name() -> None:
         return _noop_handler
 
     defs = build_builtin_defs(_g)
-    assert len(defs) == 10
-    assert len(calls) == 10
+    assert len(defs) == 11
+    assert len(calls) == 11
     assert set(calls) == {
         "help", "compact", "clear", "plan", "do",
         "session", "memory", "permission", "status", "review",
+        "skill",
     }
     print("[OK] getter invoked once per built-in")

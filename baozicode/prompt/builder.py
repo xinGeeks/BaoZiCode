@@ -85,6 +85,7 @@ class PromptBuilder:
         instructions_text: str = "",
         memory_index_user: str | None = None,
         memory_index_project: str | None = None,
+        skill_registry: object | None = None,
     ) -> BuildContext:
         cwd = cwd or os.getcwd()
         branch, commit = _detect_git_info(cwd)
@@ -102,6 +103,7 @@ class PromptBuilder:
             instructions_text=instructions_text,
             memory_index_user=memory_index_user,
             memory_index_project=memory_index_project,
+            skill_registry=skill_registry,
         )
 
     def _filter_registry(self, config: object) -> RuleRegistry:
@@ -126,12 +128,13 @@ class PromptBuilder:
         instructions_text: str = "",
         memory_index_user: str | None = None,
         memory_index_project: str | None = None,
+        skill_registry: object | None = None,
     ) -> BuiltPrompt:
         # 按 config.active_agent().rules 过滤出本次使用的 rule 集
         effective_rules = self._filter_registry(config)
         ctx = self._make_context(
             config, plan_mode, cwd, instructions_text,
-            memory_index_user, memory_index_project,
+            memory_index_user, memory_index_project, skill_registry,
         )
         # BuildContext.frozen? 不是 — 用 replace 简单替换 rule_registry
         ctx = BuildContext(**{**ctx.__dict__, "rule_registry": effective_rules})

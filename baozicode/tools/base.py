@@ -50,6 +50,12 @@ class ToolDefinition:
     `path_args` (v0.5 新增):声明此工具的哪些 argument 取值是文件系统路径。
     L2 路径沙箱用此字段做 sandbox check;Bash 的 path 提取走独立 regex。
     例:Read/Write/Edit → ["file_path"];Grep/Glob → ["path"];Bash → []。
+
+    `tool_type` (v1.0 新增):区分普通工具 / 内部工具。
+    - None 或 "user":常规工具,经过白名单防御
+    - "internal":系统级工具(如 `load_skill`),不受白名单约束(boot 时确保仅
+      注册到 LLM 的工具集,然后永远可用)
+    v0.6 之前没有此字段,所有工具默认为 None/"user"。
     """
 
     name: str
@@ -58,6 +64,7 @@ class ToolDefinition:
     risk: Risk = "low"
     side_effect: bool = False
     path_args: list[str] = field(default_factory=list)
+    tool_type: str | None = None  # None = "user",显式 "internal" = 系统级豁免
 
     def to_anthropic(self) -> dict[str, Any]:
         """转换为 Anthropic SDK 的 tool 格式。"""

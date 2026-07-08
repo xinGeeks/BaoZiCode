@@ -64,6 +64,7 @@ def app(tmp_path: Path) -> BaoZiCodeApp:
         "compact": _ui, "clear": _ui, "plan": _ui, "do": _ui,
         "session": _ui, "permission": _ui,
         "review": _review,
+        "skill": _local,
     }
     for d in build_builtin_defs(lambda n: handlers[n]):
         a._command_registry.register(d)
@@ -77,9 +78,10 @@ def app(tmp_path: Path) -> BaoZiCodeApp:
 def test_app_bootstrap_initializes_registry(app: BaoZiCodeApp) -> None:
     """App.bootstrap 后 _command_registry 存在并 freeze。"""
     assert app._command_registry is not None
-    # 10 个主名都查得到
+    # 11 个主名都查得到(v1.0 +1:/skill)
     expected = {"help", "compact", "clear", "plan", "do",
-                "session", "memory", "permission", "status", "review"}
+                "session", "memory", "permission", "status", "review",
+                "skill"}
     found = {d.name for d in app._command_registry.all_visible()}
     assert found == expected
 
@@ -214,7 +216,7 @@ async def test_dispatch_review_injects_text(app: BaoZiCodeApp) -> None:
 
 def test_completor_empty_returns_all(app: BaoZiCodeApp) -> None:
     out = candidates("", app._command_registry)
-    assert len(out) == 10
+    assert len(out) == 11
 
 
 def test_completor_single_match(app: BaoZiCodeApp) -> None:

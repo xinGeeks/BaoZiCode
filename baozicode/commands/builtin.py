@@ -1,7 +1,7 @@
 """v0.9 内置 slash 命令元数据。
 
 handler 不在此模块 — 由 `tui/chat_screen.py` 提供实现,通过
-`build_builtin_defs(handler_provider)` 拿到具体引用并组装成 10 个
+`build_builtin_defs(handler_provider)` 拿到具体引用并组装成 11 个
 `CommandDef`,然后注册到 registry。
 
 设计原因:
@@ -23,7 +23,7 @@ HandlerProvider = Callable[[str], Callable[..., Awaitable[object]]]
 
 
 def build_builtin_defs(get_handler: HandlerProvider) -> tuple[CommandDef, ...]:
-    """构造 10 个内置 `CommandDef`。
+    """构造 11 个内置 `CommandDef`(v1.0 +1:`/skill`)。
 
     Args:
         get_handler: 给定命令主名,返回 async handler 函数。
@@ -102,6 +102,16 @@ def build_builtin_defs(get_handler: HandlerProvider) -> tuple[CommandDef, ...]:
             type=CommandType.PROMPT,
             params_hint="[<since>]",
             handler=get_handler("review"),
+        ),
+        CommandDef(
+            name="skill",
+            description="管理 Skill:`/skill list` 列出可见 Skill;"
+            "`/skill <name> [args...]` 加载并激活;"
+            "`/skill clear` 清空已激活",
+            usage="/skill <list|<name> [args...]|clear>",
+            type=CommandType.LOCAL,
+            params_hint="<list|<name>|clear>",
+            handler=get_handler("skill"),
         ),
     )
 

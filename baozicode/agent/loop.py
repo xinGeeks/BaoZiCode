@@ -134,6 +134,9 @@ class Agent:
         compact_ctx: MaybeCompactContext | None = None,
         instructions_text: str = "",
         project_root: Path | None = None,
+        skill_filter: "Any | None" = None,
+        skill_activation: "Any | None" = None,
+        skill_registry: "Any | None" = None,
     ) -> None:
         if config is None:
             raise ValueError("Agent requires AppConfig in v0.4+")
@@ -160,12 +163,19 @@ class Agent:
         self._cancel_event = asyncio.Event()
         # v0.8: 三层 BaoZiCode.md 拼接结果(空 → 跳过注入)
         self._instructions_text = instructions_text
+        # v1.0: SkillRegistry(供 PromptBuilder 渲染「可用 Skill 列表」section)
+        # None 时走 v0.4 旧路径(扫 config.skills_dir)
+        self._skill_registry = skill_registry
         # v0.8: 外部(ResumeResult / MemoryUpdater)通过 enqueue_reminder 推入
         # 的 time_gap / memory_refreshed 提醒,每轮 _inject_reminders 消费一次后清空。
         self._pending_reminders: list[Message] = []
         # v0.8: 异步记忆更新器 — None 时跳过;COMPLETED / MAX_ITERATIONS_REACHED
         # 时 Agent 拿消息快照 fire-and-forget 触发 updater.update(snapshot)
         self._memory_updater: Any = None
+        # v1.0: Skill 白名单守卫(动态 L2)— None 时不限制
+        self._skill_filter: Any = skill_filter
+        # v1.0: Skill 激活状态(用于 _inject_reminders 注入 active_skills section)
+        self._skill_activation: Any = skill_activation
         # v0.8: 两层 memory index — bootstrap 后立即读出 index 文本,灌进
         # PromptBuilder 让 LLM 在每轮请求前就知道已有笔记,避免重复 add。
         memory_index_user, memory_index_project = _read_memory_indices(
@@ -179,6 +189,7 @@ class Agent:
             instructions_text=instructions_text,
             memory_index_user=memory_index_user,
             memory_index_project=memory_index_project,
+            skill_registry=skill_registry,
         )
 
     # ---- public API ----
@@ -313,6 +324,18 @@ class Agent:
                     )
                     # 只提醒一次最高频的工具,避免 reminder 爆炸
                     break
+
+        # 5) v1.0: active_skills section(SkillActivation 动态渲染)
+        # —— 始终每轮插入(只要有激活 Skill),优先级高(先于 sticky reminder)
+        if self._skill_activation is not None:
+            section = self._skill_activation.render_active_section()
+            if section:
+                reminders.append(
+                    Message(
+                        role="user",
+                        content=section,
+                    )
+                )
 
         # 4) v0.8: 外部入队的 reminder(time_gap / memory_refreshed)— ttl=once 的
         # 注入后从队列里丢弃,sticky 的保留(下一轮还会重发)。
@@ -529,14 +552,27 @@ class Agent:
         call: ToolCall,
         guard_state: GuardState,
     ) -> ToolResult:
-        """v0.5 executor:5 层防御 + L5 user 决策。
+        """v0.5 executor:5 层防御 + L5 user 决策(v1.0 加 Skill 白名单前置 L2)。
 
         流程:
+        0. skill_filter.is_allowed(call) → 不允许 → 立即 deny(累计计数)
         1. permissions.check(call, self._merged) → L1/L2/L3/L4
         2. deny → 立即返回 is_error(并累计 deny 计数,触发 reminder)
         3. allow → 直接执行
         4. fallthrough → 走 L5 user(permission_callback),按用户选择放行/拒绝
         """
+        # L0 (v1.0 Skill 动态白名单)— 早于 v0.5 五层防御
+        if self._skill_filter is not None and not self._skill_filter.is_allowed(call):
+            record_denial_warn(guard_state, call.name)
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"工具 {call.name!r} 不在当前激活 Skill 的 allowed-tools 白名单"
+                    f"(技能 'shared' / 'independent' 模式下收窄可见工具,internal 例外)"
+                ),
+                is_error=True,
+            )
+
         from baozicode.permissions import check as perms_check
 
         decision = perms_check(call, self._merged)

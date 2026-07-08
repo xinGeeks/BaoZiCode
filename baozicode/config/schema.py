@@ -12,6 +12,7 @@ __all__ = [
     "AppConfig",
     "BackendConfig",
     "BackendName",
+    "CommandsConfig",
     "CompactionConfig",
     "McpServerConfig",
     "McpServerHttpConfig",
@@ -22,6 +23,7 @@ __all__ = [
     "PermissionsV5",
     "RulesConfig",
     "SessionConfig",
+    "SkillsConfig",
 ]
 
 
@@ -179,6 +181,45 @@ class CommandsConfig(BaseModel):
     )
 
 
+class SkillsConfig(BaseModel):
+    """v1.0 Skills — Skill 系统配置。
+
+    全部字段可选:
+    - `enabled` 关闭 Skill 整套系统(load_skill tool 仍可注册,但
+      `app.skills` 用空 SkillSet 占位 — 保留兼容)
+    - 三个 dir 字段覆盖默认三级目录(`None` 时走
+      `baozicode.skills.bootstrap._default_*` 的 fallback)
+    - `summary_model` 用于独立模式 Skill 子对话的摘要生成
+      (实际 LLM 调用留作 execution 阶段)
+    - `history_bubbles_default` 是 Skill frontmatter 未指定时的回退值
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="Skill 系统总开关")
+    builtin_dir: Path | None = Field(
+        default=None,
+        description="覆盖包内 builtin Skill 目录;None 时走包内默认",
+    )
+    user_dir: Path | None = Field(
+        default=None,
+        description="覆盖 user 级 Skill 目录;None 时用 ~/.config/baozicode/skills",
+    )
+    project_dir: Path | None = Field(
+        default=None,
+        description="覆盖 project 级 Skill 目录;None 时用 <project>/.baozicode/skills",
+    )
+    summary_model: str | None = Field(
+        default=None,
+        description="独立模式 Skill 摘要生成所用模型覆盖",
+    )
+    history_bubbles_default: int = Field(
+        default=0,
+        ge=0,
+        description="Skill frontmatter 未指定 history-bubbles 时的回退值",
+    )
+
+
 class AgentConfig(BaseModel):
     """v0.3 引入 — Agent 主循环参数 + v0.4 规则与提醒节奏。
 
@@ -318,6 +359,8 @@ class AppConfig(BaseModel):
     sessions: SessionConfig = Field(default_factory=SessionConfig)
     # v0.9:slash 命令参数(目前只含 /review prompt override)
     commands: "CommandsConfig" = Field(default_factory=lambda: CommandsConfig())
+    # v1.0:Skill 系统配置(可选;None 时 bootstrap 用全部默认)
+    skills: "SkillsConfig | None" = None
 
     def active(self) -> BackendConfig:
         """返回当前激活后端的配置。"""
@@ -356,6 +399,7 @@ __all__ = [
     "AppConfig",
     "BackendConfig",
     "BackendName",
+    "CommandsConfig",
     "CompactionConfig",
     "McpServerConfig",
     "McpServerHttpConfig",
@@ -366,6 +410,7 @@ __all__ = [
     "PermissionsV5",
     "RulesConfig",
     "SessionConfig",
+    "SkillsConfig",
 ]
 
 

@@ -369,6 +369,7 @@ class ChatScreen(Screen):
                 "permission": self._cmd_permission,
                 "status":     self._cmd_status,
                 "review":     self._cmd_review,
+                "skill":      self._cmd_skill,
             }[name]
 
         for d in build_builtin_defs(_get_handler):
@@ -523,6 +524,84 @@ class ChatScreen(Screen):
         text = prefix.replace("{since}", since)
         return PromptResult(text=text)
 
+    async def _cmd_skill(self, args: str, ctx) -> CommandResult:
+        """v1.0:Skill 管理 slash。
+
+        子命令:
+        - `/skill list` — 列出可见 Skill(name + 一句话说明 + 来源)
+        - `/skill <name> [args...]` — 加载并激活该 Skill(args 用 key=value 或
+          按顺序当 body 占位符)
+        - `/skill clear` — 清空全部已激活 Skill
+        - `/skill active` — 显示当前已激活 Skill 列表
+        """
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        skill_set = getattr(app, "skills", None)
+        if skill_set is None:
+            self._append_info("[skill] Skills 系统未启用。")
+            return LocalResult()
+
+        parts = args.strip().split(maxsplit=1)
+        sub = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+
+        # /skill list
+        if sub == "list":
+            visible = skill_set.registry.list_visible()
+            if not visible:
+                self._append_info("[skill] 当前没有可见 Skill。")
+                return LocalResult()
+            lines = ["**可用 Skill**\n"]
+            for name, desc, source in visible:
+                lines.append(f"- `{name}` (来源: {source}) — {desc}")
+            self._append_info("\n".join(lines))
+            return LocalResult()
+
+        # /skill clear
+        if sub == "clear":
+            names = skill_set.activation.active_names()
+            skill_set.activation.clear()
+            if names:
+                self._append_info(f"已清空 Skill:{', '.join(names)}")
+            else:
+                self._append_info("[skill] 没有已激活的 Skill。")
+            return LocalResult()
+
+        # /skill active
+        if sub == "active":
+            names = skill_set.activation.active_names()
+            if not names:
+                self._append_info("[skill] 当前没有已激活 Skill。")
+            else:
+                lines = ["**已激活 Skill**\n"]
+                for n in names:
+                    entry = skill_set.activation.get(n)
+                    desc = entry.description if entry else ""
+                    mode = entry.mode if entry else "shared"
+                    lines.append(f"- `{n}` ({mode}) — {desc}")
+                self._append_info("\n".join(lines))
+            return LocalResult()
+
+        # /skill <name> [args...]
+        # 把 rest 解析成 dict — 先尝试 `key=value key2=value2`,否则按顺序
+        # 把整段 args 当 `{0}` 占位符
+        parsed_args: dict[str, str] = {}
+        if rest:
+            if "=" in rest:
+                for token in rest.split():
+                    if "=" in token:
+                        k, _, v = token.partition("=")
+                        if k:
+                            parsed_args[k] = v
+            else:
+                parsed_args["0"] = rest
+
+        result = skill_set.loader.load_skill(sub, args=parsed_args or None)
+        if not result.ok:
+            self._append_error(result.summary)
+            return LocalResult()
+        self._append_info(result.summary)
+        return UiStateResult()
+
     async def _handle_slash_v09(self, text: str) -> None:
         # v0.9:已迁移到 _dispatch_v09 走 commands.registry
         return
@@ -572,6 +651,11 @@ class ChatScreen(Screen):
             app.context_storage.cleanup()
         except Exception:  # noqa: BLE001
             pass
+        # v1.0:/clear 顺带清掉已激活的 Skill(active_skills section 由 _inject_reminders
+        # 每轮重建,不清就会一直钉在 prompt 里)
+        skill_set = getattr(app, "skills", None)
+        if skill_set is not None:
+            skill_set.activation.clear()
         scroll = self.query_one("#chat-scroll", VerticalScroll)
         for child in list(scroll.children):
             if child.id not in ("banner", "welcome"):
@@ -1078,6 +1162,16 @@ class ChatScreen(Screen):
 
         # ---- 准备 Agent ----
         perms = app.config.active_permissions()
+        # v1.0:从 app.skills 拿 skill_filter + skill_activation(bootstrap 时已构造)
+        skill_set = getattr(app, "skills", None)
+        from baozicode.tools.registry import get_default_tool_registry
+        skill_filter = (
+            skill_set.build_skill_filter(get_default_tool_registry())
+            if skill_set is not None
+            else None
+        )
+        skill_activation = skill_set.activation if skill_set is not None else None
+        skill_registry = skill_set.registry if skill_set is not None else None
         agent = Agent(
             llm_client=app.llm_client,
             tools=self._get_tools(),
@@ -1095,6 +1189,10 @@ class ChatScreen(Screen):
             compact_ctx=getattr(app, "compact_ctx", None),
             # v0.8:三层 BaoZiCode.md 拼接结果(空 → 跳过注入)
             instructions_text=getattr(app, "instructions", LoadedInstructions()).concatenated,
+            # v1.0:Skill 白名单守卫(L2 动态)+ 激活状态注入 + registry for prompt
+            skill_filter=skill_filter,
+            skill_activation=skill_activation,
+            skill_registry=skill_registry,
         )
         self._current_agent = agent
         app._current_agent = agent

@@ -27,6 +27,7 @@ from baozicode.mcp.manager import McpClientManager
 from baozicode.permissions import bootstrap as permissions_bootstrap
 from baozicode.permissions.engine import RuleEngine
 from baozicode.permissions.types import MergedPermissions, PermissionMode
+from baozicode.skills.bootstrap import SkillSet, bootstrap_skills
 from baozicode.sessions import (
     SessionArchiver,
     SessionMeta,
@@ -130,6 +131,26 @@ class BaoZiCodeApp(App):
         self._command_registry: CommandRegistry | None = CommandRegistry()
         self._command_ctx = None  # 由 ChatScreen 注入
 
+        # ---- v1.0:Skills bootstrap ----
+        # 启动期扫三级 builtin/user/project Skill 目录 + 构造 SkillSet。
+        # 默认 `independent_runner=None` —— chat_screen 启动后注入实际 sub-Agent
+        # 编排器(独立模式 Skill 才会用到 runner)。
+        # ToolRegistry 用模块级单例(get_default_tool_registry)拿 tool 列表;
+        # 默认走 `valid_tools` 校验,任何 allowed-tools 引用不存在的 tool → SystemExit。
+        # SkillsConfig 是 v1.0 新增的可选块 — 提供路径覆盖 / kill switch;
+        # None 时走 bootstrap 全部默认。
+        from baozicode.tools.registry import get_default_tool_registry
+        self.skills: SkillSet = bootstrap_skills(
+            self.project_root,
+            tool_registry=get_default_tool_registry(),
+            skills_config=config.skills,
+        )
+        # 把 load_skill tool 注册到 ToolRegistry —— `tool_type="internal"` 确保
+        # 即便 Skill 收窄了白名单,LLM 仍能调用它加载 Skill。
+        # 异步注册:App.__init__ 同步上下文 → 推到 on_mount 异步注册(load_skill
+        # 在 ChatScreen 第一条消息前一定就绪)。
+        self._load_skill_tool_registered: bool = False
+
     def on_mount(self) -> None:
         # v0.8:CLI 启动时若要求弹 session 选择器,先在 ChatScreen 之前 push
         if self.resume_target is not None:
@@ -141,6 +162,13 @@ class BaoZiCodeApp(App):
         self.push_screen(ChatScreen())
         if self.mcp_manager is None and self.config.mcp_servers:
             self.run_worker(self._bootstrap_mcp(), exclusive=True, name="mcp-bootstrap")
+        # v1.0:把 load_skill tool 注册到 ToolRegistry(异步,首次 mount 跑一次)
+        if not self._load_skill_tool_registered:
+            self.run_worker(
+                self._register_load_skill_tool(),
+                exclusive=True,
+                name="skill-load-skill-register",
+            )
 
     async def _startup_session_select(self) -> None:
         """v0.8 启动 session 选择流程:弹 StartupSessionScreen,根据返回值执行动作。
@@ -197,6 +225,29 @@ class BaoZiCodeApp(App):
                 "MCP bootstrap failed: %s: %s", type(exc).__name__, exc,
             )
             self.mcp_manager = None
+
+    async def _register_load_skill_tool(self) -> None:
+        """v1.0:把 load_skill tool 注册到模块级 ToolRegistry 单例。
+
+        `tool_type="internal"` 保证白名单收窄时它仍可用。
+        注册幂等:重复调只会因撞名抛 ValueError,捕获并标记已注册。
+        """
+        import logging
+        from baozicode.skills.loader import LOAD_SKILL_TOOL
+        from baozicode.tools import registry as tool_registry
+
+        try:
+            await tool_registry.register_tool(
+                LOAD_SKILL_TOOL, self.skills.loader.execute,
+                source_label="Skill",
+            )
+        except ValueError as exc:
+            # 撞名(已注册过 / 与 builtin 冲突)—— 视为已注册即可
+            logging.getLogger("baozicode.app").debug(
+                "load_skill tool 注册跳过: %s", exc,
+            )
+        finally:
+            self._load_skill_tool_registered = True
 
     async def on_unmount(self) -> None:
         """App 关闭时清理 MCP 客户端 + 上下文压缩文件。"""

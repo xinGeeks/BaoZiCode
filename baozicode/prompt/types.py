@@ -55,6 +55,9 @@ class BuildContext:
     # 空字符串 / None → 跳过对应层的渲染
     memory_index_user: str | None = None
     memory_index_project: str | None = None
+    # v1.0:SkillRegistry 实例 — `skills` section 用它枚举「可用 Skill 列表」;
+    # None 时走 v0.4 旧路径(扫 config.skills_dir)
+    skill_registry: Any = None
 
 
 @dataclass
