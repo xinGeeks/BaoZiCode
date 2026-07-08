@@ -36,12 +36,13 @@ from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, Markdown, Static
 
 from baozicode.agent.events import AgentEvent, Progress, StopReason, UsageStats
 from baozicode.config.schema import BackendName
+from baozicode.instructions import LoadedInstructions
 from baozicode.tools.base import ToolCall, ToolResult
 from baozicode.tui.banner import BAOZI_BANNER, WELCOME_TEMPLATE
 from baozicode.tui.permission_modal import PermissionChoice, PermissionModal
@@ -65,6 +66,9 @@ SLASH_COMMANDS = (
     "/status",
     "/mcp",
     "/compact",
+    "/resume",
+    "/memory",
+    "/new",
 )
 
 
@@ -150,6 +154,75 @@ class ModeSelectScreen(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class SessionSelectScreen(ModalScreen[str | None]):
+    """`/resume` 触发的 session 选择弹窗(列表)。
+
+    options: [(session_id, label), ...] — session_id 是内部 ID,label 是显示文本
+    返回选中的 session_id;按 Esc / 取消 → None。
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        current_session_id: str,
+        options: list[tuple[str, str]],
+    ) -> None:
+        super().__init__()
+        self.current_session_id = current_session_id
+        self.options = options
+
+    def compose(self) -> ComposeResult:
+        yield Static("选择要恢复的 session（按 Esc 取消）", id="session-title")
+        with Vertical(id="session-buttons"):
+            for sid, label in self.options:
+                if sid == self.current_session_id:
+                    btn_label = f"● {label}  (当前)"
+                    variant = "success"
+                else:
+                    btn_label = f"  {label}"
+                    variant = "primary"
+                yield Button(btn_label, id=f"select-{sid}", variant=variant)
+            yield Button("取消", id="cancel", variant="default")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id or ""
+        if btn_id == "cancel":
+            self.dismiss(None)
+        elif btn_id.startswith("select-"):
+            self.dismiss(btn_id.removeprefix("select-"))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ConfirmModal(ModalScreen[bool]):
+    """通用确认弹窗 — 标题 + 正文 + 确认/取消 按钮。返回 True / False。"""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, title: str, body: str) -> None:
+        super().__init__()
+        self.title_text = title
+        self.body_text = body
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.title_text, id="confirm-title")
+        yield Static(self.body_text, id="confirm-body")
+        with Horizontal(id="confirm-buttons"):
+            yield Button("确认", id="ok", variant="success")
+            yield Button("取消", id="cancel", variant="default")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ok":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class StatusBar(Static):
@@ -267,6 +340,12 @@ class ChatScreen(Screen):
             await self._handle_mcp(args.strip())
         elif cmd == "/compact":
             await self._handle_compact()
+        elif cmd == "/resume":
+            await self._handle_resume()
+        elif cmd == "/memory":
+            self._show_memory()
+        elif cmd == "/new":
+            await self._handle_new_session()
 
     # ---- slash command handlers ----
 
@@ -287,7 +366,10 @@ class ChatScreen(Screen):
             "- `/status` — 显示 mode / backend / model / token 累计\n"
             "- `/mcp` — 查看 MCP server 状态（v0.6）\n"
             "- `/mcp reconnect <name>` — 重连指定 MCP server\n"
-            "- `/compact` — 手动压缩上下文（v0.7：Layer 1 offload + Layer 2 摘要）\n\n"
+            "- `/compact` — 手动压缩上下文（v0.7：Layer 1 offload + Layer 2 摘要）\n"
+            "- `/resume` — 列出已有 session,选一个恢复（v0.8）\n"
+            "- `/memory` — 查看两层 memory 状态(v0.8)\n"
+            "- `/new` — 开始新 session（旧 session 自动归档，v0.8）\n\n"
             "**v0.3 关键变化**\n\n"
             "- Agent 自主循环：一次消息可能跨多轮（最多 "
             "`max_iterations` 轮，可在 `config.yaml` 配）\n"
@@ -601,6 +683,18 @@ class ChatScreen(Screen):
             lines.append(f"  - compactions: `{compactions.compaction_count}`")
             lines.append(f"  - tokens_saved: `{compactions.total_tokens_saved}`")
             lines.append(f"  - last_compact: `{last}`")
+        # v0.8:session + memory 段
+        lines.append(f"- session_id: `{app.session_id}`")
+        sessions = app.sessions_list()
+        lines.append(f"- sessions(磁盘): `{len(sessions)}` 个")
+        mem = app.memory_status()
+        if mem.get("enabled", False):
+            u = mem.get("user", {})  # type: ignore[arg-type]
+            p = mem.get("project", {})  # type: ignore[arg-type]
+            lines.append(f"- memory.user: {u.get('count', 0)} 条")  # type: ignore[union-attr]
+            lines.append(f"- memory.project: {p.get('count', 0)} 条")  # type: ignore[union-attr]
+        else:
+            lines.append("- memory: `disabled`")
         self._append_info("\n".join(lines))
 
     async def _handle_mcp(self, args: str) -> None:
@@ -819,6 +913,8 @@ class ChatScreen(Screen):
             permissions_engine=getattr(app, "permissions_engine", None),
             # v0.7:上下文压缩编排器 — `/compact` 走 request_compact + 自动按预算压缩
             compact_ctx=getattr(app, "compact_ctx", None),
+            # v0.8:三层 BaoZiCode.md 拼接结果(空 → 跳过注入)
+            instructions_text=getattr(app, "instructions", LoadedInstructions()).concatenated,
         )
         self._current_agent = agent
         app._current_agent = agent
@@ -1001,6 +1097,106 @@ class ChatScreen(Screen):
         widget = Static(f"**You:** {text}", classes="user-message")
         scroll.mount(widget)
         scroll.scroll_end(animate=False)
+
+    # ---- v0.8 slash handlers ----
+
+    async def _handle_resume(self) -> None:
+        """`/resume` — 弹出 session 选择 Modal,选定后调 app.resume_session。"""
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        sessions = app.sessions_list()
+        if not sessions:
+            self._append_info("没有可恢复的 session。")
+            return
+        # 构造选项:title (date) · 消息数
+        options: list[tuple[str, str]] = []
+        for s in sessions:
+            title = s.title or "(无标题)"
+            short = title[:40] + ("…" if len(title) > 40 else "")
+            date = s.last_message_at.strftime("%Y-%m-%d %H:%M")
+            label = f"{short}  ·  {date}  ·  {s.message_count} msg"
+            options.append((s.id, label))
+        chosen = await self.app.push_screen(
+            SessionSelectScreen(
+                current_session_id=app.session_id,
+                options=options,
+            ),
+            wait_for_dismiss=True,
+        )
+        if not chosen:
+            return
+        try:
+            meta = await app.resume_session(chosen)
+        except Exception as exc:  # noqa: BLE001
+            self._append_error(f"恢复 session 失败: {exc}")
+            return
+        # 通知 Agent(enqueue time_gap reminder;由下次 run 的 _inject_reminders 消费)
+        agent = app.current_agent()
+        if agent is not None:
+            agent.enqueue_reminder(
+                "time_gap",
+                f"已恢复 session `{meta.id}`(`{meta.title or '(无标题)'}`)。"
+                "如果之前的对话上下文已经变化, 请向用户确认关键事实仍成立。",
+            )
+        self._append_info(
+            f"[已恢复 session `{meta.id}` · {meta.message_count} 条消息]"
+        )
+
+    def _show_memory(self) -> None:
+        """`/memory` — 显示两层 memory 状态。"""
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        st = app.memory_status()
+        enabled = st.get("enabled", False)
+        lines = ["**Memory 状态**\n"]
+        if not enabled:
+            lines.append("- enabled: `False`（在 config.yaml 设 `memory.enabled: true` 启用）")
+        else:
+            for label in ("user", "project"):
+                d = st.get(label, {})  # type: ignore[arg-type]
+                count = d.get("count", 0)  # type: ignore[union-attr]
+                nlines = d.get("lines", 0)  # type: ignore[union-attr]
+                nbytes = d.get("bytes", 0)  # type: ignore[union-attr]
+                lines.append(f"- {label}: {count} 条笔记 · 索引 {nlines} 行 / {nbytes} 字节")
+            lines.append("\n详细笔记在:")
+            try:
+                from baozicode.memory import bootstrap as mem_bootstrap
+                us, ps = mem_bootstrap(app.project_root, app.config)
+                lines.append(f"  - user: `{us.root}`")
+                lines.append(f"  - project: `{ps.root}`")
+            except Exception:  # noqa: BLE001
+                pass
+        self._append_info("\n".join(lines))
+
+    async def _handle_new_session(self) -> None:
+        """`/new` — 确认后轮换 session_id,清空对话。"""
+        confirmed = await self.app.push_screen(
+            ConfirmModal(
+                title="开始新会话",
+                body=(
+                    "当前 session 会被归档(JSONL 落盘),"
+                    "新 session 从空对话开始。\n\n确认开始新会话?"
+                ),
+            ),
+            wait_for_dismiss=True,
+        )
+        if not confirmed:
+            return
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        old_sid = app.session_id
+        new_sid = app.start_new_session()
+        # 清空 UI
+        try:
+            app.context_storage.cleanup()
+        except Exception:  # noqa: BLE001
+            pass
+        scroll = self.query_one("#chat-scroll", VerticalScroll)
+        for child in list(scroll.children):
+            if child.id not in ("banner", "welcome"):
+                child.remove()
+        self._session_deny_count = 0
+        self._previously_denied.clear()
+        self._append_info(
+            f"[新 session `{new_sid}`(旧 `{old_sid}` 已归档)]"
+        )
 
     def _append_info(self, text: str) -> None:
         scroll = self.query_one("#chat-scroll", VerticalScroll)

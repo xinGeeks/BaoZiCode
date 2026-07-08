@@ -22,3 +22,7 @@ htmlcov/
 .claude/
 .baozicode/permissions.local.yaml
 .baozicode/context/
+.baozicode/sessions/
+.baozicode/memory/
+# 残留测试夹具(早期 smoke test 误生成)
+MagicMock/

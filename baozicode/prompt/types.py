@@ -49,6 +49,12 @@ class BuildContext:
     git_commit: str = ""
     project_name: str = ""
     now_iso: str = ""
+    # v0.8:三层 BaoZiCode.md 拼接结果(已展开 @include);空字符串 → 跳过注入
+    instructions_text: str = ""
+    # v0.8:两层 memory index(MemoryIndex.format_for_prompt() 的输出)
+    # 空字符串 / None → 跳过对应层的渲染
+    memory_index_user: str | None = None
+    memory_index_project: str | None = None
 
 
 @dataclass

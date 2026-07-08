@@ -78,7 +78,13 @@ class PromptBuilder:
         return self._rules
 
     def _make_context(
-        self, config: object, plan_mode: bool, cwd: str | None = None
+        self,
+        config: object,
+        plan_mode: bool,
+        cwd: str | None = None,
+        instructions_text: str = "",
+        memory_index_user: str | None = None,
+        memory_index_project: str | None = None,
     ) -> BuildContext:
         cwd = cwd or os.getcwd()
         branch, commit = _detect_git_info(cwd)
@@ -93,6 +99,9 @@ class PromptBuilder:
             git_commit=commit,
             project_name=Path(cwd).name,
             now_iso=datetime.now().strftime("%Y-%m-%d %H:%M:%S (%a)"),
+            instructions_text=instructions_text,
+            memory_index_user=memory_index_user,
+            memory_index_project=memory_index_project,
         )
 
     def _filter_registry(self, config: object) -> RuleRegistry:
@@ -114,19 +123,35 @@ class PromptBuilder:
         plan_mode: bool,
         tools: list[ToolDefinition],
         cwd: str | None = None,
+        instructions_text: str = "",
+        memory_index_user: str | None = None,
+        memory_index_project: str | None = None,
     ) -> BuiltPrompt:
         # 按 config.active_agent().rules 过滤出本次使用的 rule 集
         effective_rules = self._filter_registry(config)
-        ctx = self._make_context(config, plan_mode, cwd)
+        ctx = self._make_context(
+            config, plan_mode, cwd, instructions_text,
+            memory_index_user, memory_index_project,
+        )
         # BuildContext.frozen? 不是 — 用 replace 简单替换 rule_registry
         ctx = BuildContext(**{**ctx.__dict__, "rule_registry": effective_rules})
+
+        # 0. v0.8:三层 BaoZiCode.md 拼接结果(空 → 跳过)
+        instructions_block = (
+            f"## 项目指令\n{ctx.instructions_text}" if ctx.instructions_text else ""
+        )
 
         # 1. 拼 7 个固定 sections
         fixed_blocks = [fn.render(ctx) for fn in _FIXED_SECTIONS]
         # 2. 拼 3 个可选 sections(空内容跳过)
         optional_blocks = [fn.render(ctx) for fn in _OPTIONAL_SECTIONS if fn.render(ctx)]
         # 3. 用 \n\n 串联
-        stable = "\n\n".join(fixed_blocks + optional_blocks)
+        blocks: list[str] = []
+        if instructions_block:
+            blocks.append(instructions_block)
+        blocks.extend(fixed_blocks)
+        blocks.extend(optional_blocks)
+        stable = "\n\n".join(blocks)
 
         # 4. 增强工具描述(plan_mode 时只保留 side_effect=False 的只读工具)
         source_tools = tools if not plan_mode else [t for t in tools if not t.side_effect]

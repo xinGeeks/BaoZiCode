@@ -7,14 +7,19 @@ D7 决策:Plan Mode 用 side_effect 过滤工具
 D8 决策:用户取消用 asyncio.Event
 v0.4 决策:Agent 通过 AppConfig 拿配置,PromptBuilder.build() 在 __init__ 一次性构造,
         每轮 _inject_reminders() 在 messages[-2] 处插入 <system-reminder> 块
+v0.8 决策:Agent 通过 setter 注入 SessionArchiver(CoversationManager 透传 append)
+        和 MemoryUpdater(COMPLETED/MAX_ITERATIONS_REACHED 时异步触发);
+        _inject_reminders 新增 time_gap / memory_refreshed 两类 reminder。
 """
 
 from __future__ import annotations
 
 import asyncio
 import fnmatch
+from pathlib import Path
+import logging
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 from collections.abc import Awaitable, Callable
 
@@ -54,6 +59,50 @@ _DENIAL_REMINDER_BODY = (
 )
 
 
+def _read_memory_indices(
+    config: AppConfig,
+    *,
+    project_root: Path | None = None,
+) -> tuple[str | None, str | None]:
+    """从两层 MemoryStore 读出 index 文本,喂给 PromptBuilder。
+
+    - `project_root` 为 None 时退到 cwd(供测试用)
+    - 失败 / disabled → (None, None),PromptBuilder 跳过 memory section
+    """
+    try:
+        from baozicode.memory import bootstrap as memory_bootstrap
+        from baozicode.memory.store import MemoryStore  # noqa: F401
+    except ImportError:
+        return None, None
+    root = project_root if project_root is not None else Path.cwd()
+    try:
+        user_store, project_store = memory_bootstrap(root, config)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger("baozicode.agent").warning(
+            "memory bootstrap 失败: %s: %s", type(exc).__name__, exc,
+        )
+        return None, None
+    try:
+        user_idx = user_store.read_index().format_for_prompt() or None
+        project_idx = project_store.read_index().format_for_prompt() or None
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger("baozicode.agent").warning(
+            "memory index 读取失败: %s: %s", type(exc).__name__, exc,
+        )
+        return None, None
+    return user_idx, project_idx
+
+
+# v0.8:新的 reminder 类型 — Agent 收到的 reminder 列表,按顺序注入到 messages[-2]
+# key 是 reminder 类型;value 是 (body, ttl)。Phase 4 由外部(ResumeResult / MemoryUpdater)
+# 通过 `enqueue_reminder` 注入。
+# - "time_gap":ttl="once",resume 时根据首条 user 时间间隔决定插不插
+# - "memory_refreshed":ttl="sticky",MemoryUpdater 成功更新后注入
+ReminderKind = Literal["time_gap", "memory_refreshed"]
+
+
 class Agent:
     """v0.3 引入的 Agent,v0.4 与 PromptBuilder 集成。
 
@@ -83,6 +132,8 @@ class Agent:
         merged_permissions: MergedPermissions | None = None,
         permissions_engine: RuleEngine | None = None,
         compact_ctx: MaybeCompactContext | None = None,
+        instructions_text: str = "",
+        project_root: Path | None = None,
     ) -> None:
         if config is None:
             raise ValueError("Agent requires AppConfig in v0.4+")
@@ -107,9 +158,27 @@ class Agent:
         self._compact_ctx = compact_ctx
         self._compact_requested = False  # /compact 触发
         self._cancel_event = asyncio.Event()
+        # v0.8: 三层 BaoZiCode.md 拼接结果(空 → 跳过注入)
+        self._instructions_text = instructions_text
+        # v0.8: 外部(ResumeResult / MemoryUpdater)通过 enqueue_reminder 推入
+        # 的 time_gap / memory_refreshed 提醒,每轮 _inject_reminders 消费一次后清空。
+        self._pending_reminders: list[Message] = []
+        # v0.8: 异步记忆更新器 — None 时跳过;COMPLETED / MAX_ITERATIONS_REACHED
+        # 时 Agent 拿消息快照 fire-and-forget 触发 updater.update(snapshot)
+        self._memory_updater: Any = None
+        # v0.8: 两层 memory index — bootstrap 后立即读出 index 文本,灌进
+        # PromptBuilder 让 LLM 在每轮请求前就知道已有笔记,避免重复 add。
+        memory_index_user, memory_index_project = _read_memory_indices(
+            self._config, project_root=project_root,
+        )
         # PromptBuilder 构造一次,后续 run 都复用
         self._prompt: BuiltPrompt = PromptBuilder().build(
-            self._config, plan_mode=self._plan_mode, tools=self._all_tools
+            self._config,
+            plan_mode=self._plan_mode,
+            tools=self._all_tools,
+            instructions_text=instructions_text,
+            memory_index_user=memory_index_user,
+            memory_index_project=memory_index_project,
         )
 
     # ---- public API ----
@@ -117,6 +186,48 @@ class Agent:
     def cancel(self) -> None:
         """请求取消当前 run。在安全点生效,不打断正在执行的 tool。"""
         self._cancel_event.set()
+
+    def set_archiver(self, archiver: Any) -> None:
+        """v0.8:late-binding 注入 SessionArchiver(Agent 构造完后再接也允许)。
+
+        转发到 ConversationManager,archiver.append 内部已 swallow 异常。
+        None 时退回纯内存行为(v0.7)。
+        """
+        self._conversation.set_archiver(archiver)
+
+    def set_memory_updater(self, updater: Any) -> None:
+        """v0.8:注入异步记忆更新器。
+
+        updater.update(snapshot) 是 async callable,snapshot 是 list[Message] 副本。
+        触发条件见 run() 的 finally 块 — 仅在自然停止(COMPLETED)或
+        预算耗尽(MAX_ITERATIONS_REACHED)时触发;被取消 / 异常时跳过。
+        """
+        self._memory_updater = updater
+
+    def enqueue_reminder(
+        self,
+        kind: ReminderKind,
+        body: str,
+        *,
+        ttl: Literal["once", "sticky"] = "once",
+    ) -> None:
+        """v0.8:外部向下一轮 LLM 注入一条 reminder。
+
+        Args:
+            kind: reminder 类型 — "time_gap" 或 "memory_refreshed"
+            body: 注入到 `<system-reminder>` 块内的文本
+            ttl: "once" 消费一次后丢弃;"sticky" 在生命周期内每次迭代都重发
+                 (memory_refreshed 默认 sticky;time_gap 默认 once)
+        """
+        msg = Message(
+            role="user",
+            content=(
+                f'<system-reminder type="{kind}" ttl="{ttl}">\n'
+                f"{body}\n"
+                "</system-reminder>"
+            ),
+        )
+        self._pending_reminders.append(msg)
 
     def request_compact(self) -> None:
         """v0.7:请求在下次迭代顶部执行手动压缩。TUI 在 /compact 触发。
@@ -202,6 +313,20 @@ class Agent:
                     )
                     # 只提醒一次最高频的工具,避免 reminder 爆炸
                     break
+
+        # 4) v0.8: 外部入队的 reminder(time_gap / memory_refreshed)— ttl=once 的
+        # 注入后从队列里丢弃,sticky 的保留(下一轮还会重发)。
+        if self._pending_reminders:
+            sticky: list[Message] = []
+            for r in self._pending_reminders:
+                reminders.append(r)
+                # 解析 ttl:消息 content 第一行 `<system-reminder ... ttl="...">`
+                if 'ttl="sticky"' not in r.content:
+                    # once → 消费后丢弃(不加入 sticky 列表)
+                    pass
+                else:
+                    sticky.append(r)
+            self._pending_reminders = sticky
 
         if not reminders:
             return list(messages)
@@ -387,6 +512,14 @@ class Agent:
             if terminate_reason is None:
                 # 跑完循环但没有显式 reason → 兜底 MAX_ITERATIONS_REACHED
                 terminate_reason = StopReason.MAX_ITERATIONS_REACHED
+            # v0.8: 自然停止时异步触发记忆更新。
+            # 复制消息快照(updater 在另一个 task 里跑,不能直接持引用)
+            if self._memory_updater is not None and terminate_reason in (
+                StopReason.COMPLETED,
+                StopReason.MAX_ITERATIONS_REACHED,
+            ):
+                snapshot = list(self._conversation.to_list())
+                asyncio.create_task(self._memory_updater.update(snapshot))
             yield AgentEvent.done(terminate_reason)
 
     # ---- helpers ----

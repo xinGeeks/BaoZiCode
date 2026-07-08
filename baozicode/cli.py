@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from baozicode.app import BaoZiCodeApp
 from baozicode.config.loader import ConfigError, load_config
 from baozicode.mcp import bootstrap as mcp_bootstrap
+from baozicode.sessions import list_sessions
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -22,6 +24,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=None,
         help="配置文件路径（默认依次查找 ./config.yaml、~/.config/baozicode/config.yaml）",
+    )
+    # v0.8:启动 session 选择
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        metavar="SESSION_ID",
+        help="直接恢复指定 session(YYYYMMDD-HHMMSS-xxxx),跳过启动选择器",
+    )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="强制开新 session(即使磁盘上有旧的)",
+    )
+    parser.add_argument(
+        "--no-banner",
+        action="store_true",
+        help="抑制启动 banner(指令 / 记忆 / 会话摘要)",
     )
     return parser.parse_args(argv)
 
@@ -56,6 +76,82 @@ def _print_mcp_banner(manager) -> None:
             )
 
 
+def _print_v08_banner(
+    project_root: Path,
+    config,
+    pending_sessions: list,
+) -> None:
+    """v0.8 启动 banner — 指令 / 记忆 / 会话摘要,各一行 stderr。"""
+    # 1. 指令
+    try:
+        from baozicode.instructions import bootstrap as instructions_bootstrap
+        loaded = instructions_bootstrap(project_root, config)
+        layer_names = [layer.path.name for layer in loaded.layers]
+        if layer_names:
+            print(
+                f"[BaoZiCode] 指令: {len(layer_names)} layers loaded ({' + '.join(layer_names)})",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "[BaoZiCode] 指令: (none found, 建议创建项目根目录的 BaoZiCode.md)",
+                file=sys.stderr,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. 记忆
+    if config.memory.enabled:
+        try:
+            from baozicode.memory import bootstrap as mem_bootstrap
+            user_store, project_store = mem_bootstrap(project_root, config)
+            u_idx = user_store.read_index()
+            p_idx = project_store.read_index()
+            u_count = len(u_idx.entries)
+            p_count = len(p_idx.entries)
+            # 状态判断
+            from baozicode.memory.overflow import MemoryOverflowHandler
+            state = MemoryOverflowHandler._classify(  # type: ignore[attr-defined]
+                u_idx.total_lines + p_idx.total_lines,
+                u_idx.total_bytes + p_idx.total_bytes,
+            )
+            print(
+                f"[BaoZiCode] 记忆: {u_count + p_count} notes "
+                f"(user: {u_count}, project: {p_count}), "
+                f"index: {u_idx.total_lines + p_idx.total_lines} lines / "
+                f"{u_idx.total_bytes + p_idx.total_bytes} bytes "
+                f"(state: {state.name})",
+                file=sys.stderr,
+            )
+        except Exception:  # noqa: BLE001
+            print("[BaoZiCode] 记忆: (读取失败)", file=sys.stderr)
+    else:
+        print("[BaoZiCode] 记忆: disabled", file=sys.stderr)
+
+    # 3. 会话
+    if config.sessions.enabled:
+        if pending_sessions:
+            latest = pending_sessions[0]
+            title = (latest.title or "(无标题)")[:30]
+            print(
+                f"[BaoZiCode] 会话: {len(pending_sessions)} sessions found, "
+                f"latest: {latest.id} ({title})",
+                file=sys.stderr,
+            )
+        else:
+            print("[BaoZiCode] 会话: (none)", file=sys.stderr)
+    else:
+        print("[BaoZiCode] 会话: disabled", file=sys.stderr)
+
+
+def _resolve_sessions_root(project_root: Path, config) -> Path:
+    """解出 sessions 目录的绝对路径(与 app._resolve_sessions_root 同逻辑)。"""
+    sessions_dir = Path(config.sessions.dir)
+    if not sessions_dir.is_absolute():
+        sessions_dir = project_root / sessions_dir
+    return sessions_dir
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
@@ -77,7 +173,49 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[mcp] bootstrap failed: {type(exc).__name__}: {exc}", file=sys.stderr)
             mcp_manager = None
 
-    app = BaoZiCodeApp(config, mcp_manager=mcp_manager)
+    # v0.8:解析项目根、列已有 sessions、决定启动行为
+    project_root = Path.cwd().resolve()
+    pending_sessions: list = []
+    sessions_root: Path | None = None
+    if config.sessions.enabled:
+        sessions_root = _resolve_sessions_root(project_root, config)
+        try:
+            pending_sessions = list_sessions(sessions_root)
+        except Exception:  # noqa: BLE001
+            pending_sessions = []
+
+    # ---- 启动 session 选择决策 ----
+    pending_session_selection = False
+    resume_target: str | None = None
+
+    if args.new:
+        # --new:显式开新 session,跳过所有选择
+        pass
+    elif args.resume is not None:
+        # --resume ID:验证 ID 存在,不存在则报错退出
+        ids = {m.id for m in pending_sessions}
+        if args.resume not in ids:
+            print(
+                f"[BaoZiCode] --resume: 找不到 session {args.resume!r}。\n"
+                f"  已有 sessions: {', '.join(sorted(ids)) or '(none)'}",
+                file=sys.stderr,
+            )
+            return 1
+        resume_target = args.resume
+    elif pending_sessions:
+        # 无 flag 且磁盘有 sessions → on_mount 弹选择器
+        pending_session_selection = True
+
+    # ---- 打印 v0.8 banner(除非 --no-banner)----
+    if not args.no_banner:
+        _print_v08_banner(project_root, config, pending_sessions)
+
+    app = BaoZiCodeApp(
+        config,
+        mcp_manager=mcp_manager,
+        pending_session_selection=pending_session_selection,
+        resume_target=resume_target,
+    )
     app.run()
     return 0
 

@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-0.7.0-blue)
+![version](https://img.shields.io/badge/version-0.8.0-blue)
 
 ## 是什么
 
@@ -13,7 +13,8 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
 - 🔌 **四后端** — Anthropic Claude / OpenAI GPT / MiniMax / DeepSeek，YAML 一键切换
 - 🎨 **Textual TUI** — 现代终端界面，输入框、流式输出、ASCII 包子 banner
 - 🛠️ **斜杠命令** — `/help` `/clear` `/exit` `/model` `/tools` `/permissions` +
-  `/plan` `/do` `/auto` `/stop` `/status` `/mcp` `/compact`
+  `/plan` `/do` `/auto` `/stop` `/status` `/mcp` `/compact` +
+  `/resume` `/memory` `/new`
 - 🔁 **Agent Loop（v0.3 核心）** — ReAct 自主循环,一次消息可跨多轮(默认 20 轮),
   自动判断何时停止(模型说完 / 迭代上限 / 取消 / 连续幻觉 / 拒绝累积 / 失败死循环)
 - 🧰 **7 个工具** — Read / Write / Edit / Bash / Grep / Glob / WebFetch,side_effect 标记驱动并发调度
@@ -25,8 +26,15 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   动态指令通过 `<system-reminder>` 注入,7 条规则可独立开关
 - 🧮 **上下文管理（v0.7 新增）** — 两层 token 预算压缩：Layer 1 单 block / 单 message offload 到磁盘,
   Layer 2 LLM 6 段结构化摘要 + 熔断;`/compact` 手动触发,自动按 13K 安全余量逼近
+- 🗂️ **三机制长记忆（v0.8 新增）** —
+  - **项目指令文件**:三层 `BaoZiCode.md` + `@include`,优先级 user_global < project_local < project_root
+  - **会话存档**:JSONL 追加写 + `/resume` / `--resume` / `--new` / `--no-banner`,
+    session_id 用 `YYYYMMDD-HHMMSS-xxxx` 20 字符,v0.7 uuid 自动迁移
+  - **自动笔记**:双层 `user_dir` + `project_dir`,4 类(`user-pref` / `correction` / `project` / `reference`),
+    Agent 自然停下后异步调 LLM 抽取,`MEMORY.md` 索引(200 行 / 25KB)灌进 system prompt,
+    溢出三级分层(NORMAL → WARN → AUTO_COMPRESS → HUMAN_NEEDED)
 
-## 当前版本：v0.7
+## 当前版本：v0.8
 
 - ✅ 7 个工具 + `side_effect` 标记(`Plan B` 并发调度 + `Plan C` 扩展点)
 - ✅ **Agent Loop** — 7 种 `AgentEvent`(text / tool_call / tool_result / usage / progress / done / error)
@@ -60,7 +68,22 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   - **`/compact` 手动触发**:Agent 空闲直接跑;运行中通过 `agent.request_compact()` 在下个迭代顶部生效
   - **`/clear` + `on_unmount`**:清空 `.baozicode/context/<session>/` 目录
   - **`/status` 增量**:`compactions / tokens_saved / last_compact`(compaction_count > 0 时才显示)
-- ❌ 对话持久化 —— v0.5+
+- ✅ **v0.8 三机制长记忆**:
+  - **三层项目指令** — `~/.config/baozicode/BaoZiCode.md` < `<项目>/.baozicode/BaoZiCode.md` < `<项目>/BaoZiCode.md`,
+    按优先级拼接注入 `stable_system` 顶部;`@include <relpath>` 引用(深度 ≤ 5 / 环路拦截 / 路径白名单);
+    三层全无 → 静默 + banner 一行建议
+  - **JSONL 会话存档** — `sessions/<YYYYMMDD-HHMMSS-xxxx>.jsonl` 追加写
+    (每条 message + flush + fsync);`/resume` 弹选择器续接;`--resume <id>` 直接续;`--new` 强制开新;
+    resume 异常四件套:坏行跳过 / orphan tool_call 截断 / token 超限自动压 / 间隔 > 8h 插 time_gap reminder;
+    30 天过期自动清掉;v0.7 uuid → 新格式启动时迁移
+  - **双层自动笔记** — `user_dir` / `project_dir` 各一份 `MEMORY.md` 索引(200 行 / 25KB),
+    `user-pref` / `correction` → user,`project` / `reference` → project;
+    Agent 自然停下后异步调 LLM 抽取,`MEMORY.md` 索引灌进 system prompt 顶部
+    `## 长期记忆 (用户级)` / `## 长期记忆 (项目级)` 段;溢出三级分层
+    (NORMAL → WARN → AUTO_COMPRESS → HUMAN_NEEDED)
+  - **CLI flag** — `--resume <SESSION_ID>` / `--new` / `--no-banner`
+  - **Slash** — `/resume` (弹选择) / `/memory` (双层状态) / `/new` (确认后开新)
+  - **`/status` 增量** — `session_id` / `sessions(磁盘): N 个` / `memory.user: X 条` / `memory.project: Y 条`
 
 ## 上下文管理 (v0.7)
 
@@ -149,9 +172,19 @@ cp .env.example .env
 ## 启动
 
 ```bash
-baozicode            # 使用默认配置
-baozicode -c my.yaml # 使用指定配置文件
-python -m baozicode  # 等价
+baozicode                          # 使用默认配置 + 弹 session 选择器(有历史时)
+baozicode -c my.yaml               # 使用指定配置文件
+baozicode --new                    # 强制开新 session
+baozicode --resume 20260101-120000-abcd  # 续接指定 session
+baozicode --no-banner              # 抑制启动 banner
+python -m baozicode                # 等价
+```
+
+启动时 stderr 打印三行 banner(可用 `--no-banner` 关闭):
+```
+[BaoZiCode] 指令: 2 layers loaded (BaoZiCode.md + .baozicode/BaoZiCode.md)
+[BaoZiCode] 记忆: 5 notes (user: 3, project: 2), index: 12 lines / 1024 bytes (state: NORMAL)
+[BaoZiCode] 会话: 7 sessions found, latest: 20260101-120000-abcd (旧对话)
 ```
 
 ## 斜杠命令
@@ -169,9 +202,13 @@ python -m baozicode  # 等价
 | `/do [task]` | 退出 plan mode（全工具）+ 可选运行任务 |
 | `/auto` | 切换 auto 模式（跳过本会话所有 Modal） |
 | `/stop` | 取消正在运行的 Agent（Esc / Ctrl+C 同效） |
-| `/status` | 显示 mode / backend / model / token 累计 |
+| `/status` | 显示 mode / backend / model / token 累计 + session_id + memory 摘要 |
 | `/mcp` | 查看 MCP server 状态（v0.6） |
 | `/mcp reconnect <name>` | 重连指定 MCP server |
+| `/compact` | 手动触发上下文压缩（v0.7：Layer 1 offload + Layer 2 摘要） |
+| `/resume` | 列已有 sessions,选一个续接（v0.8） |
+| `/memory` | 查看 user / project 两层 memory 状态（v0.8） |
+| `/new` | 归档当前 session,开新（v0.8） |
 
 **Plan Mode 典型工作流**:
 ```

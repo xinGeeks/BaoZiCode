@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -248,6 +249,18 @@ def load_config(explicit_path: str | None = None) -> AppConfig:
         log.warning(
             "config: 同时声明 v0.2 `permissions` 与 v0.5 `permissions_v5`,"
             "v0.2 字段将被忽略,迁移见 README '权限系统' 章节"
+        )
+
+    # v0.8:`memory_path` 单文件字段被 deprecated,引导用户迁到
+    # `memory.user_dir/MEMORY.md` + `memory.project_dir/MEMORY.md`。
+    # 仅当用户显式覆盖了默认路径时报警告(避免每次启动都喊)
+    default_memory_path = Path("~/.config/baozicode/memory.md").expanduser()
+    if config.memory_path != default_memory_path and config.memory_path.exists():
+        print(
+            "WARN: memory_path is deprecated, move to "
+            f"{config.memory.user_dir}/MEMORY.md + "
+            f"{config.memory.project_dir}/MEMORY.md",
+            file=sys.stderr,
         )
 
     # v0.5:sidecar permissions*.yaml 合并到 permissions_v5

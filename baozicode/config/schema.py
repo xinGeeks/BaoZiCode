@@ -16,10 +16,12 @@ __all__ = [
     "McpServerConfig",
     "McpServerHttpConfig",
     "McpServerStdioConfig",
+    "MemoryConfig",
     "PermissionRuleYaml",
     "Permissions",
     "PermissionsV5",
     "RulesConfig",
+    "SessionConfig",
 ]
 
 
@@ -103,6 +105,62 @@ class CompactionConfig(BaseModel):
     max_consecutive_failures: int = Field(default=3, ge=1)
 
 
+class MemoryConfig(BaseModel):
+    """v0.8 — 长效记忆的索引与更新参数。
+
+    - `user_dir` / `project_dir` — 两层物理隔离的笔记目录
+      (默认 `~/.baozicode/memory/` 和 `<project>/.baozicode/memory/`)
+    - `index_max_lines` / `index_max_bytes` — `MEMORY.md` 索引硬上限
+      (默认 200 行 / 25 KB,超过时 `rewrite_index` 抛 `IndexOverflowError`)
+    - `warning_lines` / `warning_bytes` — 触达 warn 阈值的下限
+      (默认 180 行 / 22 KB),必须严格小于 max
+    - `recent_turns_for_update` — 每次 LLM 笔记提取输入近 N 轮对话
+    - `auto_compress_per_session` — 单会话内允许自动压缩的次数上限
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    user_dir: Path = Field(
+        default_factory=lambda: Path("~/.baozicode/memory").expanduser()
+    )
+    project_dir: Path = Field(default_factory=lambda: Path(".baozicode/memory"))
+    index_max_lines: int = Field(default=200, ge=50)
+    index_max_bytes: int = Field(default=25_600, ge=1024)
+    warning_lines: int = Field(default=180, ge=25)
+    warning_bytes: int = Field(default=22_528)
+    recent_turns_for_update: int = Field(default=5, ge=1)
+    auto_compress_per_session: int = Field(default=1, ge=0)
+
+    def model_post_init(self, __context: object) -> None:
+        # 逻辑不变量:warning 必须严格小于 max
+        if self.warning_lines >= self.index_max_lines:
+            raise ValueError(
+                f"memory.warning_lines ({self.warning_lines}) 必须 < "
+                f"memory.index_max_lines ({self.index_max_lines})"
+            )
+        if self.warning_bytes >= self.index_max_bytes:
+            raise ValueError(
+                f"memory.warning_bytes ({self.warning_bytes}) 必须 < "
+                f"memory.index_max_bytes ({self.index_max_bytes})"
+            )
+
+
+class SessionConfig(BaseModel):
+    """v0.8 — 会话存档参数。
+
+    - `enabled` — 关掉时跳过 SessionArchiver / resume / cleanup 全链路
+    - `dir` — JSONL 文件目录(默认 `<project>/.baozicode/sessions/`)
+    - `retention_days` — 过期会话在启动时被清理(默认 30 天)
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    dir: Path = Field(default_factory=lambda: Path(".baozicode/sessions"))
+    retention_days: int = Field(default=30, ge=1)
+
+
 class AgentConfig(BaseModel):
     """v0.3 引入 — Agent 主循环参数 + v0.4 规则与提醒节奏。
 
@@ -128,6 +186,8 @@ class AgentConfig(BaseModel):
     rules: RulesConfig = Field(default_factory=RulesConfig)
     context_window_tokens: int = Field(default=128_000, gt=0)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    # v0.8:resume 时若与上次会话间隔超过这个小时数,插入一条 time_gap 提醒
+    time_gap_threshold_hours: int = Field(default=8, gt=0)
 
 
 class PermissionRuleYaml(BaseModel):
@@ -221,7 +281,11 @@ class AppConfig(BaseModel):
     system_prompt: str = "You are BaoZiCode, a helpful AI coding assistant."
     custom_instructions: str = ""
     skills_dir: Path = Field(default_factory=lambda: Path("~/.config/baozicode/skills").expanduser())
-    memory_path: Path = Field(default_factory=lambda: Path("~/.config/baozicode/memory.md").expanduser())
+    memory_path: Path = Field(
+        default_factory=lambda: Path("~/.config/baozicode/memory.md").expanduser(),
+        description="Deprecated since v0.8. Will be removed in v0.9. "
+        "Use MemoryConfig.user_dir + MemoryConfig.project_dir with MEMORY.md index files instead.",
+    )
     anthropic: BackendConfig
     openai: BackendConfig
     minimax: BackendConfig
@@ -230,6 +294,10 @@ class AppConfig(BaseModel):
     permissions_v5: PermissionsV5 | None = None
     agent: AgentConfig | None = None
     mcp_servers: dict[str, McpServerConfig] = Field(default_factory=dict)
+    # v0.8:长效记忆两层目录 + 索引上限 + 自动压缩参数
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    # v0.8:会话存档(JSONL)+ 清理窗口
+    sessions: SessionConfig = Field(default_factory=SessionConfig)
 
     def active(self) -> BackendConfig:
         """返回当前激活后端的配置。"""
@@ -272,10 +340,12 @@ __all__ = [
     "McpServerConfig",
     "McpServerHttpConfig",
     "McpServerStdioConfig",
+    "MemoryConfig",
     "PermissionRuleYaml",
     "Permissions",
     "PermissionsV5",
     "RulesConfig",
+    "SessionConfig",
 ]
 
 

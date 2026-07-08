@@ -22,7 +22,60 @@ system_prompt: "You are BaoZiCode, a helpful AI coding assistant."
 
 # v0.4 长效记忆文件 — 类似 AGENTS.md,PromptBuilder 启动时整个文件读入 system prompt
 # 文件不存在时静默跳过,不报错
+# ⚠️ memory_path 在 v0.8 已 deprecated,v0.9 移除。请改用下面的 memory.user_dir + memory.project_dir 双层目录。
+# 兼容行为:如果 memory_path 指向的文件存在 + 新双层目录都空,会自动 fallback 把单文件当 user 级索引读,
+# 启动 banner 打印一行 WARN 提示用户迁移。
 # memory_path: ~/.config/baozicode/memory.md
+
+# v0.8 长效记忆(双层) — 自动 LLM 笔记抽取
+#
+# 双层物理隔离:
+# - user_dir:    跟人走,所有项目共享
+# - project_dir: 跟项目走,只在本项目生效
+# 每条笔记一个独立 .md 文件(带 YAML frontmatter),另有一份 MEMORY.md 索引,
+# 启动时索引灌进 system prompt 顶部 `## 长期记忆 (用户级/项目级)` 段。
+#
+# 笔记 4 类 + 自动路由:
+# - user-pref   → user_dir
+# - correction  → user_dir
+# - project     → project_dir
+# - reference   → project_dir
+#
+# 索引硬上限: 200 行 / 25 KB(MEMORY.md)
+# 触达 warn 阈值的下限: 180 行 / 22 KB
+# 每次 LLM 笔记提取输入近 5 轮对话
+# 单会话内允许自动压缩次数: 1(连续触发 → HUMAN_NEEDED 状态,提示用户人工)
+#
+# 关掉 memory(退回 v0.7 行为):
+# memory:
+#   enabled: false
+#
+# memory:
+#   enabled: true
+#   user_dir: ~/.config/baozicode/memory          # 跟人走
+#   project_dir: .baozicode/memory                 # 跟项目走(默认已 gitignore)
+#   index_max_lines: 200                           # MEMORY.md 行数硬上限(ge=50)
+#   index_max_bytes: 25600                         # MEMORY.md 字节硬上限(ge=1024)
+#   warning_lines: 180                             # WARN 阈值(必须 < max_lines)
+#   warning_bytes: 22528                           # WARN 阈值(必须 < max_bytes)
+#   recent_turns_for_update: 5                     # 每次 LLM 抽取输入近 N 轮
+#   auto_compress_per_session: 1                   # 单会话内自动压缩次数上限
+
+# v0.8 会话存档(JSONL 追加写) — 退出不丢,重启可续
+#
+# 每条 message 追加写到 <dir>/<YYYYMMDD-HHMMSS-xxxx>.jsonl
+# (中间加 flush + fsync 防止崩溃丢数据)。
+# 启动时跑 cleanup_expired 删除 retention_days 之前的 JSONL + 对应 context 目录。
+# /resume 列已有 sessions 弹选择器;--resume <id> 直接续;--new 强制开新。
+#
+# 关掉 sessions(退回 v0.7 行为,每次启动都是新 session):
+# sessions:
+#   enabled: false
+#
+# sessions:
+#   enabled: true
+#   dir: .baozicode/sessions                       # JSONL 文件目录(相对路径 → 拼到 project_root)
+#   retention_days: 30                             # 过期清理阈值(ge=1)
 
 # 注意：四个后端的配置块全部必填。
 # 即使当前用 anthropic，也要填好 minimax / deepseek 两块（key 和 model）。
@@ -196,6 +249,10 @@ deepseek:
 # agent:
 #   context_window_tokens: 0  # 0 会被 Pydantic 拒绝,所以最小是 1
 #                              # 想关掉建议直接在 CLI 不传 --enable-compact
+#
+# time_gap_threshold_hours：v0.8 — /resume 加载历史 session 时,若距上次消息
+#   超过这个小时数,插入一条 <system-reminder type="time_gap"> 提醒 LLM
+#   上下文可能已变(默认 8 小时,gt=0)。调到 0 等同不插。
 
 # MCP 外部 server 配置（v0.6 新增；整个块可省略，省略时不启动 MCP）
 #
