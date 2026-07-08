@@ -64,6 +64,7 @@ SLASH_COMMANDS = (
     "/stop",
     "/status",
     "/mcp",
+    "/compact",
 )
 
 
@@ -264,6 +265,8 @@ class ChatScreen(Screen):
             self._show_status()
         elif cmd == "/mcp":
             await self._handle_mcp(args.strip())
+        elif cmd == "/compact":
+            await self._handle_compact()
 
     # ---- slash command handlers ----
 
@@ -283,7 +286,8 @@ class ChatScreen(Screen):
             "- `/stop` — 取消正在运行的 Agent（Esc/Ctrl+C 同样有效）\n"
             "- `/status` — 显示 mode / backend / model / token 累计\n"
             "- `/mcp` — 查看 MCP server 状态（v0.6）\n"
-            "- `/mcp reconnect <name>` — 重连指定 MCP server\n\n"
+            "- `/mcp reconnect <name>` — 重连指定 MCP server\n"
+            "- `/compact` — 手动压缩上下文（v0.7：Layer 1 offload + Layer 2 摘要）\n\n"
             "**v0.3 关键变化**\n\n"
             "- Agent 自主循环：一次消息可能跨多轮（最多 "
             "`max_iterations` 轮，可在 `config.yaml` 配）\n"
@@ -301,11 +305,45 @@ class ChatScreen(Screen):
         # (session_rule 不清 — 那些是用户在本进程生命周期内累积的"会话级"规则)
         self._session_deny_count = 0
         self._previously_denied.clear()
+        # v0.7:/clear 同步清掉 offload 文件
+        try:
+            app.context_storage.cleanup()
+        except Exception:  # noqa: BLE001
+            pass
         scroll = self.query_one("#chat-scroll", VerticalScroll)
         for child in list(scroll.children):
             if child.id not in ("banner", "welcome"):
                 child.remove()
         self._append_info("对话已清空。")
+
+    def _clear_partial_cards(self) -> None:
+        """v0.7:`/compact` 在请求 Agent 暂停前调用 — 摘掉任何"半截"卡片(没有 tool_result 的 tool_call、空 text 等)。
+
+        简化实现:只清掉最近一轮所有非 banner / welcome 子节点,然后让 caller 自己 yield 新的状态行。
+        """
+        scroll = self.query_one("#chat-scroll", VerticalScroll)
+        # 只清空最后一个非空节点之后的所有卡片(简化:全清掉,然后保留 banner/welcome)
+        for child in list(scroll.children):
+            if child.id not in ("banner", "welcome"):
+                child.remove()
+
+    async def _handle_compact(self) -> None:
+        """`/compact` — 手动触发上下文压缩(v0.7)。
+
+        - Agent 在跑:`agent.request_compact()`,主循环下个迭代顶部自动跑 manual 压缩
+        - Agent 空闲:直接调 `app.run_compact_now()` 跑同步压缩,显示 token 数变化
+        """
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        agent = app.current_agent()
+        if agent is not None:
+            # Agent 正在跑 — 走异步路径(下一轮迭代顶部生效)
+            self._clear_partial_cards()
+            agent.request_compact()
+            self._append_info("[已请求压缩,Agent 下一轮迭代顶部执行...]")
+            return
+        # 空闲 — 直接跑
+        triggered, status = await app.run_compact_now()
+        self._append_info(status)
 
     async def _switch_model(self) -> None:
         app: BaoZiCodeApp = self.app  # type: ignore[assignment]
@@ -551,6 +589,18 @@ class ChatScreen(Screen):
             f"  - cache_write: `{usage.cache_write_tokens}`",
             f"  - hit_rate: `{hit_rate}%`",
         ]
+        # v0.7:compression 段(只在 compactions > 0 时显示)
+        compactions = getattr(app, "compaction_telemetry", None)
+        if compactions is not None and compactions.compaction_count > 0:
+            last = (
+                compactions.last_compact_at.isoformat(timespec="seconds")
+                if compactions.last_compact_at
+                else "(never)"
+            )
+            lines.append("- v0.7 compression:")
+            lines.append(f"  - compactions: `{compactions.compaction_count}`")
+            lines.append(f"  - tokens_saved: `{compactions.total_tokens_saved}`")
+            lines.append(f"  - last_compact: `{last}`")
         self._append_info("\n".join(lines))
 
     async def _handle_mcp(self, args: str) -> None:
@@ -767,6 +817,8 @@ class ChatScreen(Screen):
             session_mode=app.effective_mode(),
             merged_permissions=getattr(app, "permissions_v5", None),
             permissions_engine=getattr(app, "permissions_engine", None),
+            # v0.7:上下文压缩编排器 — `/compact` 走 request_compact + 自动按预算压缩
+            compact_ctx=getattr(app, "compact_ctx", None),
         )
         self._current_agent = agent
         app._current_agent = agent

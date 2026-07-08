@@ -29,6 +29,7 @@ from baozicode.agent.guards import (
 )
 from baozicode.agent.scheduler import annotate_calls, schedule
 from baozicode.config.schema import AppConfig
+from baozicode.context import CompactionError, MaybeCompactContext, maybe_compact
 from baozicode.llm.base import LLMClient, Message
 from baozicode.permissions.engine import RuleEngine
 from baozicode.permissions.types import MergedPermissions, PermissionMode
@@ -81,6 +82,7 @@ class Agent:
         session_mode: PermissionMode | None = None,
         merged_permissions: MergedPermissions | None = None,
         permissions_engine: RuleEngine | None = None,
+        compact_ctx: MaybeCompactContext | None = None,
     ) -> None:
         if config is None:
             raise ValueError("Agent requires AppConfig in v0.4+")
@@ -101,6 +103,9 @@ class Agent:
         # 存在 merged.session_rules,engine 通过 merged 间接看到,
         # 这里保存它以保证 add_session_rule 走的是同一个 merged。
         self._engine = permissions_engine
+        # v0.7: 上下文压缩编排器 — None 时跳过整层压缩
+        self._compact_ctx = compact_ctx
+        self._compact_requested = False  # /compact 触发
         self._cancel_event = asyncio.Event()
         # PromptBuilder 构造一次,后续 run 都复用
         self._prompt: BuiltPrompt = PromptBuilder().build(
@@ -112,6 +117,14 @@ class Agent:
     def cancel(self) -> None:
         """请求取消当前 run。在安全点生效,不打断正在执行的 tool。"""
         self._cancel_event.set()
+
+    def request_compact(self) -> None:
+        """v0.7:请求在下次迭代顶部执行手动压缩。TUI 在 /compact 触发。
+
+        异步安全:可在 `agent.run()` 内部任意点调,Agent 主循环会在下个
+        安全点(每轮迭代开始时)捕获这个 flag,跑 maybe_compact(trigger="manual")。
+        """
+        self._compact_requested = True
 
     @property
     def available_tools(self) -> list[ToolDefinition]:
@@ -206,7 +219,11 @@ class Agent:
         return out
 
     async def run(self, user_message: str) -> AsyncIterator[AgentEvent]:
-        """主循环:迭代 LLM → 工具 → 续流,直到触发停止条件。"""
+        """主循环:迭代 LLM → 工具 → 续流,直到触发停止条件。
+
+        v0.7 增量:每轮迭代顶部先检查手动压缩请求,再跑自动压缩;
+        Layer-2 失败用 `CompactionError` → `StopReason.COMPACTION_FAILED`。
+        """
         self._cancel_event.clear()
         self._conversation.add_user(user_message)
         guard_state = GuardState()
@@ -218,6 +235,45 @@ class Agent:
             while iteration < self._max_iterations:
                 iteration += 1
                 yield AgentEvent.progress(iteration, self._max_iterations, "streaming")
+
+                # ---- v0.7:手动压缩优先(/compact 触发)----
+                if self._compact_requested and self._compact_ctx is not None:
+                    self._compact_requested = False
+                    try:
+                        new_msgs, result = await maybe_compact(
+                            self._conversation.to_list(),
+                            trigger="manual",
+                            ctx=self._compact_ctx,
+                        )
+                    except CompactionError as exc:
+                        yield AgentEvent.error(f"compaction failed: {exc}")
+                        terminate_reason = StopReason.COMPACTION_FAILED
+                        break
+                    # 总是用新 messages(覆盖 Layer 1 offload 结果;幂等)
+                    self._conversation.set_messages(new_msgs)
+                    if result.triggered:
+                        yield AgentEvent.text(
+                            f"[已压缩:{result.tokens_before} → {result.tokens_after} tokens]\n"
+                        )
+
+                # ---- v0.7:自动压缩(预算逼近)----
+                if self._compact_ctx is not None:
+                    try:
+                        new_msgs, result = await maybe_compact(
+                            self._conversation.to_list(),
+                            trigger="auto",
+                            ctx=self._compact_ctx,
+                        )
+                    except CompactionError as exc:
+                        yield AgentEvent.error(f"compaction failed: {exc}")
+                        terminate_reason = StopReason.COMPACTION_FAILED
+                        break
+                    # 总是用新 messages(覆盖 Layer 1 offload 结果;幂等)
+                    self._conversation.set_messages(new_msgs)
+                    if result.triggered:
+                        yield AgentEvent.text(
+                            f"[已压缩:{result.tokens_before} → {result.tokens_after} tokens]\n"
+                        )
 
                 # ---- LLM stream ----
                 # v0.4: messages 注入 reminders,system/tools 来自 self._prompt

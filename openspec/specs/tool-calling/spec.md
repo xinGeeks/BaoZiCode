@@ -4,7 +4,7 @@
 TBD - created by archiving change v0-2-tool-calling. Update Purpose after archive.
 ## Requirements
 ### Requirement: Tools have a unified internal representation
-The system MUST represent every available tool as a `ToolDefinition` dataclass with `name: str`, `description: str`, `parameters: dict` (JSON Schema), `risk: Literal["low", "high"]`, `side_effect: bool` (default `False`), and `path_args: list[str]` (default `[]`, naming which arguments are filesystem paths) fields. The system MUST represent a tool invocation emitted by the LLM as a `ToolCall` dataclass with `id: str`, `name: str`, and `arguments: dict` fields. The system MUST represent a tool's outcome as a `ToolResult` dataclass with `tool_call_id: str`, `content: str`, and `is_error: bool` fields. These three dataclasses are the internal contract between the tool implementations, the LLM backends, and the TUI layer — backend SDK types MUST NOT leak past `baozicode/llm/`.
+The system MUST represent every available tool as a `ToolDefinition` dataclass with `name: str`, `description: str`, `parameters: dict` (JSON Schema), `risk: Literal["low", "high"]`, `side_effect: bool` (default `False`), and `path_args: list[str]` (default `[]`, naming which arguments are filesystem paths) fields. The system MUST represent a tool invocation emitted by the LLM as a `ToolCall` dataclass with `id: str`, `name: str`, and `arguments: dict` fields. The system MUST represent a tool's outcome as a `ToolResult` dataclass with `tool_call_id: str`, `content: str`, `is_error: bool`, `offloaded_to: Path | None` (default `None`, populated by the v0.7 Layer-1 offload engine when the content is written to `.baozicode/context/<session>/<block>.json`), and `original_size: int` (default `0`, the original byte length of `content` before any offload replaced it with a preview) fields. These three dataclasses are the internal contract between the tool implementations, the LLM backends, and the TUI layer — backend SDK types MUST NOT leak past `baozicode/llm/`.
 
 #### Scenario: ToolDefinition exposes JSON Schema parameters
 - **WHEN** a `Read` tool's `ToolDefinition.parameters` is inspected
@@ -25,6 +25,18 @@ The system MUST represent every available tool as a `ToolDefinition` dataclass w
 - **AND** the `Write` tool's `path_args` MUST equal `["file_path"]`
 - **AND** the `Edit` tool's `path_args` MUST equal `["file_path"]`
 - **AND** the `Bash` tool's `path_args` MUST equal `[]` (Bash paths are extracted by PathSandbox regex)
+
+#### Scenario: ToolResult fields default to offload-inactive
+- **WHEN** a tool finishes executing and its `content` is below the Layer-1 offload threshold
+- **THEN** the produced `ToolResult.offloaded_to` equals `None`
+- **AND** the produced `ToolResult.original_size` equals `0`
+- **AND** downstream code (permissions, conversation manager, TUI cards) MUST treat these as "no offload happened" without conditional branches
+
+#### Scenario: Offloaded ToolResult carries disk path and original size
+- **WHEN** the Layer-1 offload engine replaces the `content` of a 50 KB `ToolResult` with a preview
+- **THEN** the resulting `ToolResult.offloaded_to` equals the relative project-root path of the offload file (e.g., `.baozicode/context/<session>/<block>.json`)
+- **AND** the `ToolResult.original_size` equals the original byte length of `content` before replacement (e.g., `51200`)
+- **AND** the `ToolResult.is_error` field is preserved unchanged across the offload
 
 ### Requirement: Seven concrete tools are registered
 The system MUST register exactly seven tools in the tool registry, accessible via `get_all_tools() -> list[ToolDefinition]`: `Read`, `Write`, `Edit`, `Bash`, `Grep`, `Glob`, `WebFetch`. Each tool MUST be implemented in its own module under `baozicode/tools/`.

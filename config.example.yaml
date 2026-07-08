@@ -161,6 +161,42 @@ deepseek:
 #       pattern: "*.env"
 #       decision: deny
 
+# 上下文压缩配置（v0.7 新增；整个块可省略，省略时走 default）
+#
+# 两层压缩策略:
+# - Layer 1(预防):单条 ToolResultBlock > per_block_threshold(默认 8KB)
+#   或同 message 内 tool results 合计 > per_message_threshold(默认 20KB)
+#   时,把内容存盘,对话里只留 preview + 文件路径,避免单条消息撑爆。
+# - Layer 2(兜底):整体对话逼近窗口上限(> context_window - reserve_tokens)
+#   时调 LLM 生成 6 段结构化摘要,把较早消息摘要掉、近期原文保留。
+#   摘要 prompt 明确禁止调工具,先写 ANALYSIS 草稿再写 SUMMARY 正式段;
+#   压缩后追加 post_compaction_reminder 边界消息提醒重新读取文件。
+#
+# 触发时机:
+# - auto: 每次 LLM 请求前自动跑,余量 13K 防估算误差
+# - manual: 用户在 TUI 输入 /compact,余量 3K(用户主动要压,余量收紧)
+#
+# 摘要连续失败 max_consecutive_failures 次(默认 3) → 熔断,Agent loop
+# 走 StopReason.COMPACTION_FAILED,避免死循环。
+#
+# agent:
+#   context_window_tokens: 128000          # 全局上下文窗口(BackendConfig 里的同名
+#                                            # 字段优先,这里作为 fallback)。gt=0 校验。
+#   compaction:
+#     per_block_threshold: 8192            # 单条 ToolResultBlock 字节阈值(gt=0)
+#     per_message_threshold: 20480         # 同 message 内 tool results 字节合计阈值
+#     recent_window_min_messages: 5        # Layer 2 tail 至少留多少条原文(ge=1)
+#     recent_window_tokens: 10000          # Layer 2 tail 至少留多少 tokens(ge=1)
+#     reserve_tokens_auto: 13000           # auto 触发的安全余量(ge=0)
+#     reserve_tokens_manual: 3000          # manual 触发的安全余量(ge=0)
+#     max_summary_tokens: 2000             # LLM 摘要输出上限(ge=100)
+#     max_consecutive_failures: 3          # Layer 2 熔断阈值(ge=1)
+#
+# 关掉压缩(回到 v0.6 行为,Layer 1 + Layer 2 都不跑):
+# agent:
+#   context_window_tokens: 0  # 0 会被 Pydantic 拒绝,所以最小是 1
+#                              # 想关掉建议直接在 CLI 不传 --enable-compact
+
 # MCP 外部 server 配置（v0.6 新增；整个块可省略，省略时不启动 MCP）
 #
 # 两层配置合并：用户级 ~/.config/baozicode/config.yaml 和项目级 config.yaml

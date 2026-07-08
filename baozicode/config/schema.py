@@ -12,6 +12,7 @@ __all__ = [
     "AppConfig",
     "BackendConfig",
     "BackendName",
+    "CompactionConfig",
     "McpServerConfig",
     "McpServerHttpConfig",
     "McpServerStdioConfig",
@@ -21,15 +22,21 @@ __all__ = [
     "RulesConfig",
 ]
 
+
 BackendName = Literal["anthropic", "openai", "minimax", "deepseek"]
 
 
 class BackendConfig(BaseModel):
-    """单个 LLM 后端的配置。"""
+    """单个 LLM 后端的配置。
+
+    v0.7 新增 `context_window_tokens`:可选覆盖,设了的话该后端的有效
+    context window 用这个值;`None` 时回退到 `agent.context_window_tokens`。
+    """
 
     api_key: str
     model: str
     base_url: str | None = None
+    context_window_tokens: int | None = Field(default=None, gt=0)
 
 
 class Permissions(BaseModel):
@@ -74,6 +81,28 @@ class RulesConfig(BaseModel):
     webfetch_to_file: bool = True
 
 
+class CompactionConfig(BaseModel):
+    """v0.7 — 上下文压缩阈值与熔断参数。
+
+    - `per_block_threshold` / `per_message_threshold` — Layer 1 offload 触发阈值(字节)
+    - `recent_window_min_messages` / `recent_window_tokens` — Layer 2 tail 窗口
+    - `reserve_tokens_auto` / `reserve_tokens_manual` — 自动 / 手动触发余量
+    - `max_summary_tokens` — 摘要 LLM 输出上限
+    - `max_consecutive_failures` — 熔断阈值(连续失败 N 次抛 CompactError)
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    per_block_threshold: int = Field(default=8192, gt=0)
+    per_message_threshold: int = Field(default=20480, gt=0)
+    recent_window_min_messages: int = Field(default=5, ge=1)
+    recent_window_tokens: int = Field(default=10_000, ge=1)
+    reserve_tokens_auto: int = Field(default=13_000, ge=0)
+    reserve_tokens_manual: int = Field(default=3_000, ge=0)
+    max_summary_tokens: int = Field(default=2_000, ge=100)
+    max_consecutive_failures: int = Field(default=3, ge=1)
+
+
 class AgentConfig(BaseModel):
     """v0.3 引入 — Agent 主循环参数 + v0.4 规则与提醒节奏。
 
@@ -84,6 +113,10 @@ class AgentConfig(BaseModel):
     v0.5 新增:
     - `denial_warn_threshold`:连续拒绝次数达到此值,向 LLM 注入 reminder
       提醒它调整策略(不终止 loop)
+
+    v0.7 新增:
+    - `context_window_tokens`:全局 context window 默认值(默认 128 K)
+    - `compaction`:压缩阈值与熔断参数
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -93,6 +126,8 @@ class AgentConfig(BaseModel):
     plan_reminder_interval: int = 5
     denial_warn_threshold: int = 5
     rules: RulesConfig = Field(default_factory=RulesConfig)
+    context_window_tokens: int = Field(default=128_000, gt=0)
+    compaction: CompactionConfig = Field(default_factory=CompactionConfig)
 
 
 class PermissionRuleYaml(BaseModel):
@@ -217,12 +252,23 @@ class AppConfig(BaseModel):
         """返回当前生效的 agent 配置,`None` 时回退到全默认(max_iterations=20)。"""
         return self.agent if self.agent is not None else AgentConfig()
 
+    def effective_context_window(self) -> int:
+        """v0.7:返回当前激活后端的有效 context window。
+
+        优先级:`active().context_window_tokens` > `active_agent().context_window_tokens`。
+        """
+        backend_cfg = self.active()
+        if backend_cfg.context_window_tokens is not None:
+            return backend_cfg.context_window_tokens
+        return self.active_agent().context_window_tokens
+
 
 __all__ = [
     "AgentConfig",
     "AppConfig",
     "BackendConfig",
     "BackendName",
+    "CompactionConfig",
     "McpServerConfig",
     "McpServerHttpConfig",
     "McpServerStdioConfig",
@@ -231,3 +277,6 @@ __all__ = [
     "PermissionsV5",
     "RulesConfig",
 ]
+
+
+BackendName = Literal["anthropic", "openai", "minimax", "deepseek"]

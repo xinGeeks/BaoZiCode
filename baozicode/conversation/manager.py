@@ -87,5 +87,12 @@ class ConversationManager:
         """返回历史消息的副本。"""
         return list(self._messages)
 
+    def set_messages(self, messages: list[Message]) -> None:
+        """v0.7:用新消息列表替换全部历史 — Layer-2 摘要压缩后调用。
+
+        替换前会拷贝入参,防止 caller 之后 mutate 影响内部状态。
+        """
+        self._messages = list(messages)
+
     def __len__(self) -> int:
         return len(self._messages)

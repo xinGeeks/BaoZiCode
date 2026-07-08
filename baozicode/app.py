@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 from textual.app import App
@@ -11,6 +12,13 @@ from baozicode.agent import Agent
 from baozicode.agent.events import UsageStats
 from baozicode.config.schema import AppConfig, BackendName, BackendConfig
 from baozicode.conversation.manager import ConversationManager
+from baozicode.context import (
+    CompactionTelemetry,
+    ContextConfig,
+    ContextStorage,
+    MaybeCompactContext,
+    maybe_compact,
+)
 from baozicode.llm.base import LLMClient
 from baozicode.llm.factory import create_client
 from baozicode.mcp.manager import McpClientManager
@@ -60,6 +68,22 @@ class BaoZiCodeApp(App):
         # 如果 caller(CLI)已 bootstrap,直接接过来;否则由 on_mount worker 异步 bootstrap
         self.mcp_manager: McpClientManager | None = mcp_manager
 
+        # ---- v0.7:上下文压缩启动 ----
+        # 单一 session_id 跨整次 CLI 进程;context_storage 把 oversized blocks
+        # 写到 `.baozicode/context/<session_id>/`,/clear 时清空,on_unmount 也清。
+        self._session_id: str = uuid.uuid4().hex
+        self.context_storage: ContextStorage = ContextStorage(
+            project_root=self.project_root, session_id=self._session_id
+        )
+        self.compaction_telemetry: CompactionTelemetry = CompactionTelemetry()
+        # 编排器 ctx — Agent 启动时拿一份;每次 /compact 也可以直接拿
+        self.compact_ctx: MaybeCompactContext = MaybeCompactContext(
+            llm=self.llm_client,
+            storage=self.context_storage,
+            config=self._build_context_config(trigger="auto"),
+            telemetry=self.compaction_telemetry,
+        )
+
     def on_mount(self) -> None:
         self.push_screen(ChatScreen())
         if self.mcp_manager is None and self.config.mcp_servers:
@@ -80,13 +104,57 @@ class BaoZiCodeApp(App):
             self.mcp_manager = None
 
     async def on_unmount(self) -> None:
-        """App 关闭时清理 MCP 客户端(关闭所有 session,unregister 工具)。"""
+        """App 关闭时清理 MCP 客户端 + 上下文压缩文件。"""
         if self.mcp_manager is not None:
             try:
                 await self.mcp_manager.shutdown()
             except Exception:  # noqa: BLE001
                 pass
             self.mcp_manager = None
+        # v0.7:清掉本 session 的 offload 文件,避免泄漏到下次启动
+        try:
+            self.context_storage.cleanup()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _build_context_config(self, *, trigger: str) -> ContextConfig:
+        """从 AppConfig 派生一次 ContextConfig(每次 maybe_compact 复用同一份,只在 trigger 切换时重建)。"""
+        from baozicode.config.schema import CompactionConfig
+
+        compaction = (
+            self.config.active_agent().compaction
+            if self.config.active_agent()
+            else CompactionConfig()
+        )
+        return ContextConfig.build(
+            context_window_tokens=self.config.effective_context_window(),
+            trigger=trigger,  # type: ignore[arg-type]
+            compaction=compaction,
+        )
+
+    async def run_compact_now(self) -> tuple[bool, str]:
+        """v0.7:由 TUI /compact 在 Agent 空闲时直接调用 — 手动触发 Layer 1 + Layer 2。
+
+        返回 `(triggered, status_text)`:
+        - `triggered=True, status_text="已压缩:X → Y tokens"`
+        - `triggered=False, status_text="..."`(说明未触发或失败)
+        """
+        from baozicode.context import CompactionResult
+
+        ctx = self.compact_ctx
+        ctx.config = self._build_context_config(trigger="manual")
+        try:
+            new_msgs, result = await maybe_compact(
+                self.conversation.to_list(),
+                trigger="manual",
+                ctx=ctx,
+            )
+        except Exception as exc:
+            return False, f"[compact] failed: {exc}"
+        if result.triggered:
+            self.conversation.set_messages(new_msgs)
+            return True, f"[已压缩:{result.tokens_before} → {result.tokens_after} tokens]"
+        return False, f"[compact] 未触发(失败原因:{result.failure_kind})"
 
     def switch_backend(self, target: BackendName) -> None:
         """切换到 `target` 后端。已经是目标则 no-op。"""

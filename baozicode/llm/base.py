@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Union
 
 from baozicode.tools.base import ToolDefinition
@@ -35,12 +36,25 @@ class ToolUseBlock:
 
 @dataclass
 class ToolResultBlock:
-    """Anthropic 风格：在 tool message 里记录工具结果。"""
+    """Anthropic 风格：在 tool message 里记录工具结果。
+
+    v0.7 新增 `offloaded_to` + `original_size`(默认 `None` / `0`):
+    - `offloaded_to`:v0.7 Layer-1 offload 把超大 content 写盘时,记录相对
+      项目根的 offload 文件路径(例如 `.baozicode/context/<sess>/<block>.json`)。
+      LLM API 序列化时不带此字段(只发 `tool_use_id` / `content` / `is_error`)。
+    - `original_size`:原 content 的 UTF-8 字节长度;offload 后 `content` 是
+      preview 字符串(几百~几千字节),`original_size` 仍是原始大小,token
+      估算器用它做精确估算。
+
+    字段默认 `None` / `0` 是 v0.6 行为,所有现有调用方零修改。
+    """
 
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str = ""
     content: str = ""
     is_error: bool = False
+    offloaded_to: Path | None = None
+    original_size: int = 0
 
 
 ContentBlock = Union[TextBlock, ToolUseBlock, ToolResultBlock]

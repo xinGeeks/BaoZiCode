@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-0.5.0-blue)
+![version](https://img.shields.io/badge/version-0.7.0-blue)
 
 ## 是什么
 
@@ -13,7 +13,7 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
 - 🔌 **四后端** — Anthropic Claude / OpenAI GPT / MiniMax / DeepSeek，YAML 一键切换
 - 🎨 **Textual TUI** — 现代终端界面，输入框、流式输出、ASCII 包子 banner
 - 🛠️ **斜杠命令** — `/help` `/clear` `/exit` `/model` `/tools` `/permissions` +
-  `/plan` `/do` `/auto` `/stop` `/status` `/mcp`
+  `/plan` `/do` `/auto` `/stop` `/status` `/mcp` `/compact`
 - 🔁 **Agent Loop（v0.3 核心）** — ReAct 自主循环,一次消息可跨多轮(默认 20 轮),
   自动判断何时停止(模型说完 / 迭代上限 / 取消 / 连续幻觉 / 拒绝累积 / 失败死循环)
 - 🧰 **7 个工具** — Read / Write / Edit / Bash / Grep / Glob / WebFetch,side_effect 标记驱动并发调度
@@ -23,8 +23,10 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
 - 📋 **Plan Mode（v0.3）** — `/plan <task>` 先读后规划,`/do` 再切全工具执行
 - 🧱 **模块化 system prompt（v0.4 新增）** — 11 段拼装,稳定指令走 LLM 缓存通道,
   动态指令通过 `<system-reminder>` 注入,7 条规则可独立开关
+- 🧮 **上下文管理（v0.7 新增）** — 两层 token 预算压缩：Layer 1 单 block / 单 message offload 到磁盘,
+  Layer 2 LLM 6 段结构化摘要 + 熔断;`/compact` 手动触发,自动按 13K 安全余量逼近
 
-## 当前版本：v0.4
+## 当前版本：v0.7
 
 - ✅ 7 个工具 + `side_effect` 标记(`Plan B` 并发调度 + `Plan C` 扩展点)
 - ✅ **Agent Loop** — 7 种 `AgentEvent`(text / tool_call / tool_result / usage / progress / done / error)
@@ -49,7 +51,56 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   分行显示,命中率 = `round(cache_read / (cache_read + input) * 100, 1)`
 - ✅ 进度状态栏(`{iteration}/{max} · {phase}`)+ 底部 mode 切换
 - ✅ 11 个斜杠命令 + Esc/Ctrl+C 取消(运行中)或退出(idle)
+- ✅ **v0.7 上下文管理** — 两层 token 预算压缩:
+  - **Layer 1(offload)**:单 block > 8 KB 或单 message 合计 > 20 KB → 写盘 + 替换为 preview(头 25 + 尾 25 行),`.baozicode/context/<session>/` 下文件默认 `.gitignore`
+  - **Layer 2(摘要)**:整体 token 逼近 `context_window - 13K`(自动)或 `- 3K`(手动) → 调 LLM 生成 6 段摘要(Goal / Progress / Decisions / Files / Open Issues / Next),保留近期 ≥ 5 条或 ≥ 10K tokens 原文;3 次连续失败熔断,`StopReason.COMPACTION_FAILED` 终止 Agent
+  - **.baozicode/context/** 自动加 `.gitignore`(幂等)
+  - **summary prompt 显式禁止调工具**:`tools=[]` + system 提示 "Never call tools";先写 `---ANALYSIS---` 草稿(丢弃),再写 `---SUMMARY---` 正文
+  - **post-compaction reminder**:摘要后追加 `<system-reminder type="post_compaction">`,提醒 LLM 摘要不可信,需要细节重新调 Read/Grep/Bash
+  - **`/compact` 手动触发**:Agent 空闲直接跑;运行中通过 `agent.request_compact()` 在下个迭代顶部生效
+  - **`/clear` + `on_unmount`**:清空 `.baozicode/context/<session>/` 目录
+  - **`/status` 增量**:`compactions / tokens_saved / last_compact`(compaction_count > 0 时才显示)
 - ❌ 对话持久化 —— v0.5+
+
+## 上下文管理 (v0.7)
+
+两层压缩策略,轻量预防 + 重量兜底,保证对话累积再多也不会因为上下文溢出而瘫掉。
+
+**触发时机**
+
+- 每次 API 请求前先跑 Layer 1(管单条消息大小),再看是否需要 Layer 2(管累积历史长度)
+- 自动触发:`reserve_tokens = 13K`(留 13K 安全余量防估算误差)
+- 手动触发:`reserve_tokens = 3K`(`/compact` 时余量收窄,用户主动要压)
+
+**Layer 1 — 磁盘 offload**
+
+- 单 ToolResultBlock.content 字节数 > `per_block_threshold`(默认 8K)→ 写盘 + preview
+- 单 Message(role="tool") 字节合计 > `per_message_threshold`(默认 20K)→ 挑大的依次 offload
+- preview 格式:`--- preview ({bytes} bytes) ---\n<first 25 lines>\n... [N lines / M bytes omitted] ...\n<last 25 lines>\n--- offloaded to: {relpath} ---`
+- 幂等:`offloaded_to is not None` 的 block 第二轮 offload 直接跳过,不会重复写盘
+
+**Layer 2 — LLM 6 段摘要**
+
+- 从尾部按 token / count 双阈值往回数(默认 ≥ 10K tokens 或 ≥ 5 条),head = 其余
+- 摘要 prompt:`---ANALYSIS---` 草稿 + `---SUMMARY---` 正文,显式禁止工具调用,6 段固定结构
+- 失败语义:stream 异常 / parse 失败 / 摘要后 token 仍超阈值 → 失败计数 +1;连续 3 次 → `CompactionError`,Agent yield `done(reason=COMPACTION_FAILED)`
+- 摘要后追加 `<system-reminder type="post_compaction">` 提醒需要文件细节时重新调用工具
+
+**配置示例**
+
+```yaml
+agent:
+  context_window_tokens: 128000      # 默认 128K
+  compaction:
+    per_block_threshold: 8192        # 单 block offload 阈值(字节)
+    per_message_threshold: 20480     # 单 message 聚合 offload 阈值(字节)
+    recent_window_min_messages: 5    # 摘要后保留的近期最少消息数
+    recent_window_tokens: 10000      # 摘要后保留的近期最少 tokens
+    reserve_tokens_auto: 13000       # 自动触发安全余量
+    reserve_tokens_manual: 3000      # /compact 触发安全余量
+    max_summary_tokens: 2000         # 摘要输出上限
+    max_consecutive_failures: 3      # 摘要失败熔断阈值
+```
 
 ## 安装
 

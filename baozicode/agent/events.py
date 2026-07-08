@@ -36,6 +36,7 @@ class StopReason(str, Enum):
     DENIALS_EXCEEDED = "denials_exceeded"
     FAILED_TOOL_LOOP = "failed_tool_loop"
     STREAM_ERROR = "stream_error"
+    COMPACTION_FAILED = "compaction_failed"  # v0.7:Layer-2 摘要连续失败熔断
 
 
 AgentEventType = Literal[
