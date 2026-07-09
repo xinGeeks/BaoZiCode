@@ -1087,3 +1087,340 @@ def test_pre_hook_overhead_under_500ms_with_three_shell_hooks():
         f"(可能 dispatcher 有性能回归,或 CI 机器太慢)"
     )
     assert res.denied is False
+
+
+# ---------- v1.2: system.compaction / system.cancel fire ----------
+
+
+def test_system_compaction_event_fires_on_maybe_compact():
+    """v1.2:maybe_compact 入口 fire `system.compaction`,payload 含 trigger + tokens_before。
+
+    用一个非常高的 context_window 让 Layer 1 + Layer 2 都不真正执行(空 messages
+    + 0 tokens + 巨大 budget),只验证入口的 fire。spy dispatcher 记录所有调用。
+    """
+    from pathlib import Path
+    from baozicode.context import (
+        ContextConfig,
+        ContextStorage,
+        MaybeCompactContext,
+        maybe_compact,
+    )
+    from baozicode.context.schema import CompactionTelemetry
+    from baozicode.llm.base import Message
+
+    fired: list[tuple[str, Any]] = []
+
+    class _SpyDispatcher:
+        def run(self, event: str, payload: Any):
+            fired.append((event, payload))
+            return None
+
+    cfg = ContextConfig(
+        context_window_tokens=1_000_000,  # 远大于 messages token,budget 也够大
+        reserve_tokens=1000,
+        per_block_threshold=8192,
+        per_message_threshold=20480,
+        recent_window_min_messages=5,
+        recent_window_tokens=10240,
+        max_summary_tokens=2048,
+        max_consecutive_failures=3,
+    )
+    storage = ContextStorage(project_root=Path("/tmp"), session_id="test-v12-compact")
+    ctx = MaybeCompactContext(
+        llm=MagicMock(),  # 不会真被调(Layer 2 因 budget 不触发)
+        storage=storage,
+        config=cfg,
+        telemetry=CompactionTelemetry(),
+    )
+    messages = [Message(role="user", content="hi")]
+
+    asyncio.run(maybe_compact(
+        messages, trigger="manual", ctx=ctx, hook_dispatcher=_SpyDispatcher(),  # type: ignore[arg-type]
+    ))
+
+    # 第 1 个 fire 必须是 system.compaction
+    assert fired, "expected at least one fire"
+    event, payload = fired[0]
+    assert event == "system.compaction"
+    assert payload == {"trigger": "manual", "tokens_before": 1}
+
+
+def test_system_cancel_event_fires_on_user_cancel():
+    """v1.2:Agent.run 触发 USER_CANCELLED 时 fire `system.cancel`,payload 是 spec'd dict。
+
+    复刻 _TwoTurnLLM 模式:让 Agent 跑 1 轮就完事;在 LLM stream 内 set _cancel_event
+    模拟用户在中途按 Ctrl-C(Agent.run 入口会 clear,必须在迭代内 mark)。
+    """
+    from baozicode.agent.events import StopReason, UsageStats
+    from baozicode.agent.loop import Agent
+    from baozicode.conversation.manager import ConversationManager
+    from baozicode.llm.base import ContentDelta
+    from baozicode.tools.registry import get_all_tools
+    from collections.abc import AsyncIterator
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from _agent_helpers import make_minimal_config
+
+    fired: list[tuple[str, Any]] = []
+    cancel_agent_ref: list[Agent] = []  # 用 list 闭包存 agent 引用
+
+    class _MiniDispatcher:
+        def run(self, event: str, payload: Any):
+            fired.append((event, payload))
+            return None
+
+    class _CancelMidStreamLLM(LLMClient):
+        async def stream(
+            self, messages, system, tools, *, cache_breakpoints=None
+        ) -> AsyncIterator[ContentDelta]:
+            yield ContentDelta(type="text", text="hello")
+            # 模拟用户在流中间取消
+            if cancel_agent_ref:
+                cancel_agent_ref[0]._cancel_event.set()
+            yield ContentDelta(type="usage", text=UsageStats(input_tokens=5, output_tokens=3))
+
+    config = make_minimal_config()
+    agent = Agent(
+        llm_client=_CancelMidStreamLLM(),
+        tools=get_all_tools(),
+        conversation=ConversationManager(),
+        permissions=None,
+        config=config,
+        hook_dispatcher=_MiniDispatcher(),  # type: ignore[arg-type]
+    )
+    cancel_agent_ref.append(agent)
+
+    async def _collect():
+        async for _ in agent.run("hi"):
+            pass
+
+    asyncio.run(_collect())
+
+    names = [e for e, _ in fired]
+    assert "system.cancel" in names
+    # system.cancel 在 session.end 之前(用户取消 → 走完循环 → 收尾)
+    assert names.index("system.cancel") < names.index("session.end")
+    # payload 是 spec'd dict
+    cancel_payload = next(p for e, p in fired if e == "system.cancel")
+    assert isinstance(cancel_payload, dict)
+    assert cancel_payload["reason"] == "user_cancelled"
+    assert "iteration" in cancel_payload
+    # iteration 是 int
+    assert isinstance(cancel_payload["iteration"], int)
+    assert cancel_payload["iteration"] >= 1
+
+
+# ---------- v1.2: 2 clear actions ----------
+
+
+class _StubAgent:
+    """最小 agent stub — 只带 3 个 hook 注入字段,供 clear action 测试用。"""
+
+    def __init__(self) -> None:
+        self._pending_reminders = ["m1", "m2"]
+        self._hook_stable_overrides = ["x", "y"]
+        self._temp_reminders = ["t"]
+
+
+def test_clear_sticky_reminders_action_empties_pending_reminders():
+    """v1.2:clear_sticky_reminders action 只清 _pending_reminders。
+
+    executor 跑完后,`_pending_reminders == []`;`_hook_stable_overrides` 和
+    `_temp_reminders` 不动(语义独立,详见 v1.2 design D3)。
+    """
+    from baozicode.hooks.executor import execute_clear_sticky_reminders
+    from baozicode.hooks.schema import _ClearStickyAction
+
+    agent = _StubAgent()
+    ctx = HookContext(
+        event="tool.post",
+        hook_id="clear-test",
+        payload=None,
+        agent=agent,
+    )
+    action = _ClearStickyAction(action="clear_sticky_reminders")
+
+    result = asyncio.run(execute_clear_sticky_reminders(action, ctx))
+
+    assert result.deny is False
+    assert agent._pending_reminders == []
+    # 其它两个不动
+    assert agent._hook_stable_overrides == ["x", "y"]
+    assert agent._temp_reminders == ["t"]
+
+
+def test_clear_stable_system_overrides_action_empties_overrides():
+    """v1.2:clear_stable_system_overrides action 只清 _hook_stable_overrides。"""
+    from baozicode.hooks.executor import execute_clear_stable_overrides
+    from baozicode.hooks.schema import _ClearStableAction
+
+    agent = _StubAgent()
+    ctx = HookContext(
+        event="turn.start",
+        hook_id="clear-test",
+        payload=None,
+        agent=agent,
+    )
+    action = _ClearStableAction(action="clear_stable_system_overrides")
+
+    result = asyncio.run(execute_clear_stable_overrides(action, ctx))
+
+    assert result.deny is False
+    assert agent._hook_stable_overrides == []
+    # 其它两个不动
+    assert agent._pending_reminders == ["m1", "m2"]
+    assert agent._temp_reminders == ["t"]
+
+
+def test_clear_actions_do_not_touch_other_hook_state():
+    """v1.2:两个 clear action 语义独立 — 跑哪个只动哪个,另两个保持原样。
+
+    额外验证:ActionYaml discriminator 能正确识别 2 个新 kind(parse_hook_def)。
+    """
+    from baozicode.hooks.executor import execute_action
+    from baozicode.hooks.schema import (
+        _ClearStableAction,
+        _ClearStickyAction,
+        parse_hook_def,
+    )
+
+    # parse_hook_def 接受 2 个新 action kind
+    h1 = parse_hook_def({
+        "id": "cs1", "event": "turn.start",
+        "actions": [{"action": "clear_sticky_reminders"}],
+    })
+    h2 = parse_hook_def({
+        "id": "cs2", "event": "turn.end",
+        "actions": [{"action": "clear_stable_system_overrides"}],
+    })
+    assert isinstance(h1.actions[0], _ClearStickyAction)
+    assert isinstance(h2.actions[0], _ClearStableAction)
+
+    # 跑 clear_sticky 后 _hook_stable_overrides + _temp_reminders 仍原样
+    agent_a = _StubAgent()
+    ctx_a = HookContext(event="tool.post", hook_id="a", payload=None, agent=agent_a)
+    asyncio.run(execute_action(h1.actions[0], ctx_a))
+    assert agent_a._pending_reminders == []
+    assert agent_a._hook_stable_overrides == ["x", "y"]
+    assert agent_a._temp_reminders == ["t"]
+
+    # 跑 clear_stable 后 _pending_reminders + _temp_reminders 仍原样
+    agent_b = _StubAgent()
+    ctx_b = HookContext(event="turn.end", hook_id="b", payload=None, agent=agent_b)
+    asyncio.run(execute_action(h2.actions[0], ctx_b))
+    assert agent_b._pending_reminders == ["m1", "m2"]
+    assert agent_b._hook_stable_overrides == []
+    assert agent_b._temp_reminders == ["t"]
+
+
+# ---------- v1.2: TUI ToolResultCard colors ----------
+
+
+def test_tool_card_renders_color_per_execution_status():
+    """v1.2:ToolResultCard 构造时按 execution_status 加语义 CSS class。
+
+    5 种 status 各自一色,None 走默认(向后兼容 v1.0 旧 ToolResult)。
+    检查 widget.classes 包含预期 class 即可(不需 render 截图)。
+    """
+    from baozicode.tui.tool_card import EXEC_STATUS_CLASS, ToolResultCard
+
+    cases = [
+        ("block_l1", "-block-l1"),
+        ("block_hook_pre", "-block-hook-pre"),
+        ("block_permission", "-block-permission"),
+        ("executed_success", "-executed-success"),
+        ("executed_failed", "-executed-failed"),
+    ]
+    for status, expected_class in cases:
+        result = ToolResult(
+            tool_call_id="t1",
+            content="out",
+            is_error=(status != "executed_success"),
+            execution_status=status,  # type: ignore[arg-type]
+        )
+        card = ToolResultCard(result)
+        # widget.classes 是 token list;用 "in" 查包含
+        cls_str = " ".join(card.classes) if not isinstance(card.classes, str) else card.classes
+        assert expected_class in cls_str, (
+            f"status={status} expected class={expected_class!r} in card.classes={cls_str!r}"
+        )
+        # 反向断言:互斥的 class 不应同时出现
+        for other_status, other_class in cases:
+            if other_status != status:
+                assert other_class not in cls_str, (
+                    f"status={status} 意外包含 {other_class}(互斥污染)"
+                )
+
+    # 兜底:None 不加任何 v1.2 class(向后兼容)
+    legacy = ToolResult(tool_call_id="t2", content="out", is_error=False)
+    card_legacy = ToolResultCard(legacy)
+    cls_legacy = " ".join(card_legacy.classes) if not isinstance(card_legacy.classes, str) else card_legacy.classes
+    for _, c in cases:
+        assert c not in cls_legacy, (
+            f"legacy ToolResult(execution_status=None) 不应包含 {c}"
+        )
+
+    # EXEC_STATUS_CLASS 映射自检
+    assert set(EXEC_STATUS_CLASS.keys()) == {
+        "block_l1", "block_hook_pre", "block_permission",
+        "executed_success", "executed_failed",
+    }
+
+
+# ---------- v1.2: shell env var 暴露 dict payload ----------
+
+
+def test_shell_exposes_dict_payload_as_event_arg_env_vars(monkeypatch):
+    """v1.2:shell action 跑 lifecycle 事件(dict payload)时,env 注入
+    $EVENT_ARG_<i>(位置)和 $EVENT_<KEY>(命名键大写)。
+
+    锁住 system.compaction / system.cancel 这种 dict payload 也能在 shell
+    command 里读到的能力。tool.pre / tool.post 仍走 $ARG_<NAME>(不动)。
+    """
+    from baozicode.hooks.executor import execute_shell
+    from baozicode.hooks.schema import _ShellAction
+
+    captured_env: dict[str, str] = {}
+
+    # monkeypatch subprocess 抓 env
+    import asyncio
+
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _fake_exec(*args, **kwargs):
+        # 把 env 抓出来
+        captured_env.update(kwargs.get("env", {}))
+        # 返回一个最小 proc:communicate 立即返回 (b"", b"")
+        class _FakeProc:
+            returncode = 0
+            async def communicate(self):
+                return (b"", b"")
+            def kill(self):
+                pass
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        "baozicode.hooks.executor.asyncio.create_subprocess_exec", _fake_exec,
+    )
+
+    action = _ShellAction(action="shell", command="echo $EVENT_TRIGGER $EVENT_ITERATION")
+    ctx = HookContext(
+        event="system.cancel",
+        hook_id="env-test",
+        payload={"reason": "user_cancelled", "iteration": 7},
+        agent=None,
+    )
+
+    result = asyncio.run(execute_shell(action, ctx))
+
+    # 位置 + 命名键都暴露
+    assert captured_env["EVENT_ARG_0"] == "user_cancelled"
+    assert captured_env["EVENT_ARG_1"] == "7"
+    assert captured_env["EVENT_REASON"] == "user_cancelled"
+    assert captured_env["EVENT_ITERATION"] == "7"
+    # EVENT / HOOK_ID 仍照 v1.1 注入
+    assert captured_env["EVENT"] == "system.cancel"
+    assert captured_env["HOOK_ID"] == "env-test"
+    # exit 0 → 不 deny
+    assert result.deny is False

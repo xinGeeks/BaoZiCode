@@ -315,6 +315,7 @@ class BaoZiCodeApp(App):
                 self.conversation.to_list(),
                 trigger="manual",
                 ctx=ctx,
+                hook_dispatcher=self.hook_dispatcher,
             )
         except Exception as exc:
             return False, f"[compact] failed: {exc}"

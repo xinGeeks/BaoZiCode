@@ -38,16 +38,22 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   execute → hook.post` 流水线,`tool.pre` 能拦在五层防御之前,`tool.post` 必触发,
   hook 失败 fail-open 不阻断 Agent
 
-## 当前版本：v1.1
+## 当前版本：v1.2
 
-- ✅ **Hooks 生命周期(v1.1 新增)** — `baozicode/hooks/`
+- ✅ **Hooks 生命周期(v1.1 新增,v1.2 polish)** — `baozicode/hooks/`
   - 在 Agent 关键节点(session / turn / message / tool / system 共 11 个
     事件)挂「事件 + 条件 + 动作」三要素规则,让重复自动化
   - **条件语法**:精确 / 反向 / 正则 / glob,逻辑组合 `all` / `any`(二选一)
     复用权限规则匹配;`if` 省略即无条件
-  - **4 种 action**:`shell`(`exit_code` 判 deny)、`prompt`(3 档 slot:
+  - **6 种 action**:`shell`(`exit_code` 判 deny)、`prompt`(3 档 slot:
     sticky_reminder / stable_system / temp)、`http`(simpleeval
-    `parse_expr` 决定 deny)、`sub-agent`(占位,v1.1.1 接通)
+    `parse_expr` 决定 deny)、`sub-agent`(占位,v1.1.1 接通)、
+    `clear_sticky_reminders` / `clear_stable_system_overrides`(v1.2 control action,
+    各自只清一类 hook 注入状态)
+  - **v1.2 polish**:`system.compaction` / `system.cancel` 在各自时机可靠 fire
+    (手动 / 自动压缩路径都 fire,取消时 fire 改 dict payload 含 `iteration`),
+    TUI `ToolResultCard` 按 `execution_status` 5 色渲染(L1 红 / hook_pre 黄 /
+    L2-L5 橙 / success 绿 / failed 红)
   - **流水线插桩**:`L1 → hook.pre → L2-L5 → execute → hook.post`,
     L1 是 hard-wall(hook.pre 改不掉),`tool.post` 用 `try/finally` 包整个
     pipeline,任何 tool_call 尝试必触发(完整审计)
@@ -63,8 +69,8 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   - **审计**:`HookAuditLog` 异步 JSONL append + 100 MB 启动期轮转,
     默认 `<project>/.baozicode/hooks/<session>.audit.jsonl`
   - 没有 `hooks:` 块的 v1.0 项目,Agent 走 legacy 路径(v1.0 byte-identical)
-  - 详细迁移 + 字段表 + 11 个事件清单 + 4 种 action 详解 + 10 个 FAQ 见
-    `docs/migrations/v1.0-to-v1.1.md`
+  - 详细迁移 + 字段表 + 11 个事件清单 + 6 种 action 详解 + 10 个 FAQ 见
+    `docs/migrations/v1.0-to-v1.1.md`,v1.2 polish 见 `docs/migrations/v1.1-to-v1.2.md`
 
 - ✅ **Skill 系统(v1.0 新增)** — `baozicode/skills/`
   - 把可复用 AI 操作封装成独立 Markdown 文件 + YAML frontmatter,3 个内置

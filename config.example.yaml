@@ -402,3 +402,42 @@ hooks:
             >> .baozicode/audit.log
         timeout_seconds: 5
         enqueue: false  # 默认,后台日志只写文件,不 enqueue_reminder
+
+  # v1.2 control action 示例:turn.start 时清空上一轮累积的 sticky reminder
+  # 语义独立 — 只清 _pending_reminders,_hook_stable_overrides / _temp_reminders 不动
+  - id: reset-sticky-each-turn
+    event: turn.start
+    actions:
+      - action: clear_sticky_reminders
+
+  # v1.2 control action 示例:turn.end 时清空本轮注入到 stable_system 的 override 段
+  # 语义独立 — 只清 _hook_stable_overrides,_pending_reminders / _temp_reminders 不动
+  - id: clear-overrides-each-turn
+    event: turn.end
+    actions:
+      - action: clear_stable_system_overrides
+
+  # v1.2 system.compaction fire:压缩前先写一行"压缩前快照"日志
+  # payload 通过 env var $EVENT_ARG_0 (trigger) / $EVENT_ARG_1 (tokens_before) 暴露
+  - id: log-pre-compaction
+    event: system.compaction
+    actions:
+      - action: shell
+        command: |
+          echo "[$(date -Iseconds)] compaction trigger=$EVENT_ARG_0 tokens_before=$EVENT_ARG_1" \
+            >> .baozicode/compaction.log
+        timeout_seconds: 5
+
+  # v1.2 system.cancel fire:用户取消时调 HTTP 通知外部系统
+  # payload 是 dict {reason: "user_cancelled", iteration: int}
+  # v1.2 起 dict payload 的命名键通过 $EVENT_<KEY> 大写 env var 暴露
+  - id: notify-cancel
+    event: system.cancel
+    actions:
+      - action: http
+        url: http://audit.example/cancel
+        method: POST
+        body:
+          reason: "$EVENT_REASON"
+          iteration: "$EVENT_ITERATION"
+        parse_expr: 'res.deny = res.status == 500'

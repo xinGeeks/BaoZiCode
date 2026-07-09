@@ -94,3 +94,31 @@ ModelSelectScreen {
     width: 100%;
     margin: 0 0 0 0;
 }
+
+/* v1.2:ToolResultCard 按 execution_status 上色。
+   5 种 status 各自一色,None 走默认(无 -block-* / -executed-* class 命中) */
+ToolResultCard.-block-l1 {
+    border-left: thick $error;
+    color: $error;
+}
+
+ToolResultCard.-block-hook-pre {
+    border-left: thick $warning;
+    color: $warning;
+}
+
+ToolResultCard.-block-permission {
+    /* v1.2:橙在 Textual 默认主题无内置色,用 amber 风格 */
+    border-left: thick #ffa500;
+    color: #ffa500;
+}
+
+ToolResultCard.-executed-success {
+    border-left: thick $success;
+    color: $success;
+}
+
+ToolResultCard.-executed-failed {
+    border-left: thick $error;
+    color: $error;
+}

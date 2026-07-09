@@ -1,4 +1,4 @@
-"""Action 执行器:4 种 action 各自的 run 函数 + 公共 ActionResult。
+"""Action 执行器:6 种 action 各自的 run 函数 + 公共 ActionResult。
 
 shell:
 - asyncio.create_subprocess_exec("bash", "-c", command)
@@ -22,6 +22,10 @@ prompt:
 - slot=temp → agent._temp_reminders(下轮 _inject_reminders 消费即清)
 - enqueue=False → 仅 log.info
 
+clear_sticky_reminders / clear_stable_system_overrides(v1.2):
+- control action,语义独立 — 各自只清 Agent 上的一类 hook 注入状态
+- deny 永远 False(control action,不能配 deny/Pydantic extra=forbid 挡住)
+
 shell action 不允许 deny / parse_expr(Pydantic extra="forbid" 挡住);同理 prompt。
 """
 from __future__ import annotations
@@ -37,6 +41,8 @@ from typing import Any, TYPE_CHECKING
 from baozicode.hooks._errors import HookParseError, HookSlotError
 from baozicode.hooks.schema import (
     HookDefYaml,
+    _ClearStableAction,
+    _ClearStickyAction,
     _HttpAction,
     _PromptAction,
     _ShellAction,
@@ -69,7 +75,13 @@ class ActionResult:
 
 
 async def execute_shell(action: _ShellAction, ctx: "HookContext") -> ActionResult:
-    """跑 bash -c command。env 自动注入 $TOOL_NAME / $ARG_<NAME> 等。"""
+    """跑 bash -c command。env 自动注入 $TOOL_NAME / $ARG_<NAME> 等。
+
+    v1.2:对 lifecycle 事件的 dict payload(如 `system.compaction` 的
+    `{"trigger": ..., "tokens_before": ...}`)也注入 — 位置用 `$EVENT_ARG_<i>`,
+    命名键用 `$EVENT_<KEY>`(大写)。tool.pre / tool.post 仍走 $ARG_<NAME>
+    (ToolCall.arguments 路径,不变)。
+    """
     env = os.environ.copy()
     env["TOOL_NAME"] = getattr(ctx.payload, "name", "") if ctx.payload else ""
     env["TOOL_CALL_ID"] = getattr(ctx.payload, "id", "") if ctx.payload else ""
@@ -79,6 +91,12 @@ async def execute_shell(action: _ShellAction, ctx: "HookContext") -> ActionResul
         for k, v in ctx.payload.arguments.items():
             v_str = v if isinstance(v, str) else str(v)
             env[f"ARG_{k.upper()}"] = v_str
+    elif isinstance(ctx.payload, dict):
+        # v1.2:lifecycle 事件的 dict payload 暴露给 shell env
+        for i, (k, v) in enumerate(ctx.payload.items()):
+            v_str = v if isinstance(v, str) else str(v)
+            env[f"EVENT_ARG_{i}"] = v_str
+            env[f"EVENT_{str(k).upper()}"] = v_str
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -236,6 +254,51 @@ async def execute_prompt(action: _PromptAction, ctx: "HookContext") -> ActionRes
     return ActionResult(deny=False, enqueue_body=body)
 
 
+# ---------- v1.2 control: clear_sticky_reminders ----------
+
+
+async def execute_clear_sticky_reminders(
+    action: _ClearStickyAction, ctx: "HookContext"
+) -> ActionResult:
+    """v1.2:清空 Agent._pending_reminders(sticky `hook_prompt` reminder 队列)。
+
+    语义独立 — **不动** `_hook_stable_overrides` 或 `_temp_reminders`。
+    `ctx.agent=None` 时仅 log.warning,返回 deny=False(no-op)。
+    """
+    if ctx.agent is None:
+        log.warning("hook %s clear_sticky_reminders:agent 未注入,no-op", ctx.hook_id)
+        return ActionResult(deny=False)
+    try:
+        ctx.agent._pending_reminders = []
+    except Exception as exc:
+        log.warning("hook %s clear_sticky_reminders 失败: %s", ctx.hook_id, exc)
+        return ActionResult(deny=False, error=str(exc))
+    return ActionResult(deny=False)
+
+
+# ---------- v1.2 control: clear_stable_system_overrides ----------
+
+
+async def execute_clear_stable_overrides(
+    action: _ClearStableAction, ctx: "HookContext"
+) -> ActionResult:
+    """v1.2:清空 Agent._hook_stable_overrides(钉在 stable_system 末尾的 `## Hook Overrides` 段)。
+
+    语义独立 — **不动** `_pending_reminders` 或 `_temp_reminders`。
+    """
+    if ctx.agent is None:
+        log.warning(
+            "hook %s clear_stable_system_overrides:agent 未注入,no-op", ctx.hook_id
+        )
+        return ActionResult(deny=False)
+    try:
+        ctx.agent._hook_stable_overrides = []
+    except Exception as exc:
+        log.warning("hook %s clear_stable_system_overrides 失败: %s", ctx.hook_id, exc)
+        return ActionResult(deny=False, error=str(exc))
+    return ActionResult(deny=False)
+
+
 # ---------- 公共 ----------
 
 
@@ -249,6 +312,10 @@ async def execute_action(action: Any, ctx: "HookContext") -> ActionResult:
         return await execute_subagent(action, ctx)
     if isinstance(action, _PromptAction):
         return await execute_prompt(action, ctx)
+    if isinstance(action, _ClearStickyAction):
+        return await execute_clear_sticky_reminders(action, ctx)
+    if isinstance(action, _ClearStableAction):
+        return await execute_clear_stable_overrides(action, ctx)
     return ActionResult(deny=False, error=f"unknown action kind: {type(action).__name__}")
 
 

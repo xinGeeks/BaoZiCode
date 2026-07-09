@@ -4,7 +4,8 @@
 HookDefYaml 是 `config.yaml: hooks:` 块的根节点；
 ConditionYaml 在 if. 之下,支持 all / any 二选一；
 MatcherYaml 是单条 match 规则(精确 / glob / regex / not_ 三种变体)；
-ActionYaml 是 4 种动作的 tagged union(shell / http / prompt / sub-agent)。
+ActionYaml 是 6 种动作的 tagged union(shell / http / prompt / sub-agent /
+clear_sticky_reminders / clear_stable_system_overrides)。
 
 校验规则(在 HookRegistry.freeze() 阶段执行,Pydantic 不全挡住):
 - id 唯一
@@ -155,8 +156,39 @@ class _SubAgentAction(BaseModel):
         return v
 
 
+class _ClearStickyAction(BaseModel):
+    """v1.2 control action:清空 Agent._pending_reminders(sticky `hook_prompt` 队列)。
+
+    无其他字段 — `deny` / `deny_reason` / `parse_expr` 均不允许(control action,
+    extra=forbid 由 Pydantic 自动拦截)。语义独立:**不动** `_hook_stable_overrides`
+    或 `_temp_reminders`。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["clear_sticky_reminders"]
+
+
+class _ClearStableAction(BaseModel):
+    """v1.2 control action:清空 Agent._hook_stable_overrides(钉在 stable_system 末尾的段)。
+
+    语义独立:**不动** `_pending_reminders` 或 `_temp_reminders`。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["clear_stable_system_overrides"]
+
+
 ActionYaml = Annotated[
-    Union[_ShellAction, _HttpAction, _PromptAction, _SubAgentAction],
+    Union[
+        _ShellAction,
+        _HttpAction,
+        _PromptAction,
+        _SubAgentAction,
+        _ClearStickyAction,
+        _ClearStableAction,
+    ],
     Field(discriminator="action"),
 ]
 

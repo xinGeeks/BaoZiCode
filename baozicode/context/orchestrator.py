@@ -9,8 +9,9 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from baozicode.context.layer1 import OffloadEngine
 from baozicode.context.schema import CompactionResult, CompactionTelemetry, ContextConfig
@@ -18,6 +19,8 @@ from baozicode.context.storage import ContextStorage
 from baozicode.llm.base import LLMClient, Message
 
 __all__ = ["MaybeCompactContext", "maybe_compact"]
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,6 +41,7 @@ async def maybe_compact(
     *,
     trigger: Literal["auto", "manual"],
     ctx: MaybeCompactContext,
+    hook_dispatcher: Any | None = None,
 ) -> tuple[list[Message], CompactionResult]:
     """v0.7 主入口:Layer 1 + 条件 Layer 2。
 
@@ -45,9 +49,24 @@ async def maybe_compact(
     - Layer 1 必跑(offload oversized blocks)
     - 若 post-Layer-1 token 数 > `context_window - reserve_tokens` → 跑 Layer 2
     - Layer 2 失败 → 返回原 messages + `CompactionResult(triggered=False, failure_kind="compact_error")`
+
+    v1.2:若传 `hook_dispatcher`(Agent 的 HookDispatcher 实例),入口 fire
+    `system.compaction` 事件,`payload = {"trigger": trigger, "tokens_before": <len(messages)>}`,
+    让用户 hook 进压缩时机。fire 失败仅 log.warning,不打断压缩(fail-open)。
+    `hook_dispatcher=None` 时跳过(v0.7-v1.1 向后兼容)。
     """
     from baozicode.context.estimator import estimate_messages_tokens
     from baozicode.context.layer2 import CompactEngine
+
+    # v1.2:system.compaction fire(入口,失败 fail-open)
+    if hook_dispatcher is not None:
+        try:
+            hook_dispatcher.run("system.compaction", {
+                "trigger": trigger,
+                "tokens_before": len(messages),
+            })
+        except Exception as exc:
+            log.warning("hook system.compaction 异常,继续: %s", exc)
 
     # Layer 1(总是跑 — 幂等,无副作用,返回新 messages)
     offload_engine = OffloadEngine(storage=ctx.storage, config=ctx.config)

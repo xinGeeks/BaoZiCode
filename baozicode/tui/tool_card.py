@@ -6,9 +6,20 @@ import json
 
 from textual.widgets import Static
 
-from baozicode.tools.base import ToolCall, ToolResult
+from baozicode.tools.base import ExecutionStatus, ToolCall, ToolResult
 
 MAX_RESULT_DISPLAY_BYTES = 2_000
+
+# v1.2:ToolResult.execution_status → widget CSS class 映射
+# 5 种 status 各自一色,None 走默认(向后兼容 v1.0 旧 ToolResult)。
+# 颜色具体值在 styles.tcss 配,这里只锁语义 class 名。
+EXEC_STATUS_CLASS: dict[ExecutionStatus, str] = {
+    "block_l1": "-block-l1",
+    "block_hook_pre": "-block-hook-pre",
+    "block_permission": "-block-permission",
+    "executed_success": "-executed-success",
+    "executed_failed": "-executed-failed",
+}
 
 
 def _format_args(args: dict) -> str:
@@ -71,7 +82,12 @@ class ToolResultCard(Static):
 
     def __init__(self, result: ToolResult) -> None:
         body = self._render_body(result)
-        super().__init__(body, classes="tool-result-card")
+        # v1.2:按 execution_status 加语义 CSS class(None 走默认,向后兼容)
+        extra_class = EXEC_STATUS_CLASS.get(result.execution_status, "")
+        classes = "tool-result-card"
+        if extra_class:
+            classes = f"{classes} {extra_class}"
+        super().__init__(body, classes=classes)
         self.result = result
 
     def _render_body(self, result: ToolResult) -> str:

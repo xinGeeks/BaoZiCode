@@ -433,14 +433,13 @@ class Agent:
 
                 # ---- v0.7:手动压缩优先(/compact 触发)----
                 if self._compact_requested and self._compact_ctx is not None:
-                    # v1.1:system.compaction 事件
-                    self._fire_lifecycle_safe("system.compaction", "manual")
                     self._compact_requested = False
                     try:
                         new_msgs, result = await maybe_compact(
                             self._conversation.to_list(),
                             trigger="manual",
                             ctx=self._compact_ctx,
+                            hook_dispatcher=self._hook_dispatcher,
                         )
                     except CompactionError as exc:
                         yield AgentEvent.error(f"compaction failed: {exc}")
@@ -460,6 +459,7 @@ class Agent:
                             self._conversation.to_list(),
                             trigger="auto",
                             ctx=self._compact_ctx,
+                            hook_dispatcher=self._hook_dispatcher,
                         )
                     except CompactionError as exc:
                         yield AgentEvent.error(f"compaction failed: {exc}")
@@ -599,9 +599,12 @@ class Agent:
                 terminate_reason = StopReason.STREAM_ERROR
             yield AgentEvent.error(f"unhandled: {exc}")
         finally:
-            # v1.1:system.cancel(若用户取消)
+            # v1.1:system.cancel(若用户取消)— v1.2 改 payload 为 spec'd dict
             if self._cancel_event.is_set():
-                self._fire_lifecycle_safe("system.cancel", "user_interrupt")
+                self._fire_lifecycle_safe("system.cancel", {
+                    "reason": "user_cancelled",
+                    "iteration": iteration,
+                })
             # v1.1:session.end(无论什么 stop 路径都 fire,system.error 之后也必跑)
             self._fire_lifecycle_safe("session.end", None)
             if terminate_reason is None:
