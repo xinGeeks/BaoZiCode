@@ -20,7 +20,8 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
 - 🧰 **7 个工具** — Read / Write / Edit / Bash / Grep / Glob / WebFetch,side_effect 标记驱动并发调度
 - 🔒 **权限控制** — 五层防御(v0.5):L1 黑名单 / L2 沙箱 / L3 规则引擎 / L4 模式(strict/default/permissive) / L5 人在回路
 - 🔌 **MCP 集成（v0.6 新增）** — 启动时自动发现外部 MCP server(stdio / Streamable HTTP),
-  把 server 暴露的工具接进工具中心;`/mcp` slash 命令查看 server 状态 / 重连
+  把 server 暴露的工具接进工具中心;`BaoZiCodeApp._mcp_manager.states` 字典保留
+  per-server 状态,banner 启动期打印 `N connected, M failed`
 - 📋 **Plan Mode（v0.3）** — `/plan <task>` 先读后规划,`/do` 再切全工具执行
 - 🧱 **模块化 system prompt（v0.4 新增）** — 11 段拼装,稳定指令走 LLM 缓存通道,
   动态指令通过 `<system-reminder>` 注入,7 条规则可独立开关
@@ -28,8 +29,9 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   Layer 2 LLM 6 段结构化摘要 + 熔断;`/compact` 手动触发,自动按 13K 安全余量逼近
 - 🗂️ **三机制长记忆（v0.8 新增）** —
   - **项目指令文件**:三层 `BaoZiCode.md` + `@include`,优先级 user_global < project_local < project_root
-  - **会话存档**:JSONL 追加写 + `/resume` / `--resume` / `--new` / `--no-banner`,
-    session_id 用 `YYYYMMDD-HHMMSS-xxxx` 20 字符,v0.7 uuid 自动迁移
+  - **会话存档**:JSONL 追加写 + `--resume <sid>` / `--new` / `--no-banner` + `/session`
+    slash 弹选择器续接,session_id 用 `YYYYMMDD-HHMMSS-xxxx` 20 字符,
+    v0.7 uuid 自动迁移
   - **自动笔记**:双层 `user_dir` + `project_dir`,4 类(`user-pref` / `correction` / `project` / `reference`),
     Agent 自然停下后异步调 LLM 抽取,`MEMORY.md` 索引(200 行 / 25KB)灌进 system prompt,
     溢出三级分层(NORMAL → WARN → AUTO_COMPRESS → HUMAN_NEEDED)
@@ -37,6 +39,20 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   让格式化、拦截、上下文注入从手动盯变成机器自动做。`L1 → hook.pre → L2-L5 →
   execute → hook.post` 流水线,`tool.pre` 能拦在五层防御之前,`tool.post` 必触发,
   hook 失败 fail-open 不阻断 Agent
+- 🧰 **Skill 系统（v1.0 新增）** — 把可复用 AI 操作封装成 Markdown + YAML frontmatter 文件,
+  启动期**两阶段加载**(只列 `name + description` 进 system prompt,保持轻);激活时
+  按需加载 body,替换占位符后钉进 `<system-reminder type="active_skills">`。
+  3 级存放 project > user > builtin;两种执行模式 `shared`(主对话)/ `independent`
+  (子对话);L1 启动期校验 `allowed-tools` 全部存在 + L2 运行期收窄到 union 命中放行;
+  3 个内置 Skill(`commit` / `review` / `test`),`load_skill` 是 system 工具永远放行
+- 🤖 **SubAgent 委派（v1.2 新增）** — 主 Agent 通过统一 `task` 工具派子任务给独立
+  sub-Agent。两条派发路径:`definition`(干净上下文 + 角色身份,4 层 AND 工具过滤,
+  `GLOBAL_DENY={task}` 硬禁嵌套)/ `fork`(共享主对话历史,prompt cache byte-identical
+  命中,省钱)。默认 `async: true` 后台跑,sync 可设 `timeout_seconds` 超时自动切后台;
+  3 种进入后台方式(显式 / 超时 / 手动 demote);主 Agent cancel 级联 cancel_all。
+  2 个内置样板:`explorer`(Read/Grep/Glob/WebFetch)/ `summarizer`(Read/Grep/Glob + haiku)
+  。**Breaking**:v1.0 旧 `SkillExecutor.independent_runner` 注入路径删除,独立模式
+  重走 SubAgent 通道
 
 ## 当前版本：v1.2
 
