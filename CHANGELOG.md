@@ -2,6 +2,49 @@
 
 BaoZiCode 所有重要变更记录在此。版本号遵循 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。
 
+## [v1.1] — 2026-07
+
+### 新增能力
+
+- **Hooks 生命周期**(`baozicode/hooks/`)
+  - 在 Agent 生命周期的关键节点(session.start/end / turn.start/end /
+    message.received/sent / tool.pre/post / system.error / system.compaction /
+    system.cancel 共 11 个事件)挂「事件 + 条件 + 动作」三要素规则
+  - 条件复用权限规则的匹配语法:`exact / glob / regex / not_exact /
+    not_glob / not_regex`,逻辑组合用 `all` 或 `any` 二选一;省略即无条件
+  - 4 种 action:执行 shell 命令(`exit_code` 判 deny)、注入提示词(3 档 slot:
+    `sticky_reminder` / `stable_system` / `temp`)、发 HTTP 请求、用 simpleeval
+    沙箱解析 `parse_expr` 决定 deny
+  - 流水线插到五层防御中间:**L1 → hook.pre → L2-L5 → execute →
+    hook.post**,L1 永远是 hard-wall(hook.pre 改不掉),`tool.post` 用
+    `try/finally` 包住整个流水线,任何 tool_call 尝试必触发
+  - `ToolResult` 增字段:`execution_status` (block_l1 / block_hook_pre /
+    block_permission / executed_success / executed_failed)、`denied_by`
+    (l1_blacklist / hook_pre / l2_l5_permission)、`denied_hook_id`;
+    `is_error` 由 `__post_init__` 派生,旧调用方式完全兼容
+  - 执行控制:`run_once`(全 session 只跑一次)/ `async`(只对 `tool.post`
+    允许)/ `timeout_seconds`(默认 30,拒绝 hook 后台挂死)
+  - 失败策略:**fail-open** — hook 抛任何异常只 `log.warning`,
+    `Agent.run` 主流程不阻断(与权限系统「fail-closed」对称)
+  - 集中校验:启动期 `HookRegistry.freeze()` 收集所有错误一次性报
+    (duplicate id / invalid event / async+tool.pre / slot=stable_system
+    on tool.* 等),`SystemExit(1)` 拒绝启动
+  - 审计:`HookAuditLog` 异步 JSONL append + 100 MB 启动期轮转,
+    `<project>/.baozicode/hooks/<session>.audit.jsonl`
+  - 配置在 `config.yaml` 顶层 `hooks:` 块(YAML 列表,保留声明顺序),
+    启动顺序接在 permissions 之后、instructions 之前
+
+### 兼容性
+
+- v1.0 配置 + 旧命令 + 旧 Skill `skills_dir/*.md` 单文件路径全部继续工作
+- 没有 `hooks:` 块的 v1.0 项目,Agent 走 legacy `_v5_executor`
+  (L1 → L2 → L3 → L4 → L5 → execute),与 v1.0 byte-identical 行为
+
+### 已归档变更
+
+- `openspec/changes/archive/2026-07-09-v1-1-hooks-lifecycle/`(proposal +
+  design + tasks + 4 个 delta spec + 1 个新 capability spec)
+
 ## [v1.0] — 2026-07
 
 ### 新增能力

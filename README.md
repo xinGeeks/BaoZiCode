@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-0.9.0-blue)
+![version](https://img.shields.io/badge/version-1.1.0-blue)
 
 ## 是什么
 
@@ -33,8 +33,36 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   - **自动笔记**:双层 `user_dir` + `project_dir`,4 类(`user-pref` / `correction` / `project` / `reference`),
     Agent 自然停下后异步调 LLM 抽取,`MEMORY.md` 索引(200 行 / 25KB)灌进 system prompt,
     溢出三级分层(NORMAL → WARN → AUTO_COMPRESS → HUMAN_NEEDED)
+- 🔔 **Hooks 生命周期（v1.1 新增）** — 在 Agent 关键节点上挂「事件 + 条件 + 动作」三要素规则,
+  让格式化、拦截、上下文注入从手动盯变成机器自动做。`L1 → hook.pre → L2-L5 →
+  execute → hook.post` 流水线,`tool.pre` 能拦在五层防御之前,`tool.post` 必触发,
+  hook 失败 fail-open 不阻断 Agent
 
-## 当前版本：v1.0
+## 当前版本：v1.1
+
+- ✅ **Hooks 生命周期(v1.1 新增)** — `baozicode/hooks/`
+  - 在 Agent 关键节点(session / turn / message / tool / system 共 11 个
+    事件)挂「事件 + 条件 + 动作」三要素规则,让重复自动化
+  - **条件语法**:精确 / 反向 / 正则 / glob,逻辑组合 `all` / `any`(二选一)
+    复用权限规则匹配;`if` 省略即无条件
+  - **4 种 action**:`shell`(`exit_code` 判 deny)、`prompt`(3 档 slot:
+    sticky_reminder / stable_system / temp)、`http`(simpleeval
+    `parse_expr` 决定 deny)、`sub-agent`(占位,v1.1.1 接通)
+  - **流水线插桩**:`L1 → hook.pre → L2-L5 → execute → hook.post`,
+    L1 是 hard-wall(hook.pre 改不掉),`tool.post` 用 `try/finally` 包整个
+    pipeline,任何 tool_call 尝试必触发(完整审计)
+  - **执行控制**:`run_once`(全 session 只跑一次)/ `async`(只对 `tool.post`
+    允许)/ `timeout_seconds`(默认 30)
+  - **fail-open**:hook 抛任何异常只 `log.warning`,Agent 主流程不阻断
+    (与权限系统「fail-closed」对称)
+  - **ToolResult 新字段**:`execution_status` / `denied_by` / `denied_hook_id`,
+    `is_error` 由 `__post_init__` 派生;旧调用方式完全兼容
+  - **配置 + 校验**:`config.yaml` 顶层 `hooks:` 块(YAML 列表,声明顺序),
+    启动期 `HookRegistry.freeze()` 收集所有错误一次性报
+    (duplicate id / async+tool.pre / stable_system on tool.* 等)
+  - **审计**:`HookAuditLog` 异步 JSONL append + 100 MB 启动期轮转,
+    默认 `<project>/.baozicode/hooks/<session>.audit.jsonl`
+  - 没有 `hooks:` 块的 v1.0 项目,Agent 走 legacy 路径(v1.0 byte-identical)
 
 - ✅ **Skill 系统(v1.0 新增)** — `baozicode/skills/`
   - 把可复用 AI 操作封装成独立 Markdown 文件 + YAML frontmatter,3 个内置
