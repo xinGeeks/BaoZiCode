@@ -24,6 +24,27 @@ from baozicode.hooks.schema import (
     MatcherYaml,
 )
 
+def clear_hook_runtime_state(agent: Any) -> None:
+    """v1.1.1:重置 Agent 上 hook 注入的 3 类运行时状态,新对话起点。
+
+    清 3 项(都安全 getattr,缺失跳过):
+    - _pending_reminders:sticky `hook_prompt` reminder 会污染新对话第一轮
+    - _hook_stable_overrides:`## Hook Overrides` 段钉在 stable_system 末尾
+    - _temp_reminders:本意 turn-scoped,跨 turn 持久化无意义
+
+    Hook 定义本身(config.yaml: hooks: 列表)不动 —— 只清运行时注入状态。
+    由 chat_screen._clear_conversation 在 /clear 路径调用。
+    """
+    if agent is None:
+        return
+    for attr in ("_pending_reminders", "_hook_stable_overrides", "_temp_reminders"):
+        if hasattr(agent, attr):
+            try:
+                setattr(agent, attr, [])
+            except Exception:
+                pass
+
+
 __all__ = [
     "ActionResult",
     "ActionYaml",
@@ -39,6 +60,7 @@ __all__ = [
     "HookValidationError",
     "MatchValue",
     "MatcherYaml",
+    "clear_hook_runtime_state",
     "evaluate_condition",
     "execute_action",
     "load_hooks",

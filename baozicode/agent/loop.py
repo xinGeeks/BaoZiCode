@@ -191,6 +191,8 @@ class Agent:
         self._hook_dispatcher: Any = hook_dispatcher
         # v1.1: stable_system slot 的 hook prompt 覆盖(append 进 stable_system 末尾)
         self._hook_stable_overrides: list[str] = []  # loaded on session.start
+        # v1.1.1: temp slot 的 hook prompt — 一次性,下轮 _inject_reminders 消费即清
+        self._temp_reminders: list[str] = []
         # v0.8: 两层 memory index — bootstrap 后立即读出 index 文本,灌进
         # PromptBuilder 让 LLM 在每轮请求前就知道已有笔记,避免重复 add。
         memory_index_user, memory_index_project = _read_memory_indices(
@@ -365,6 +367,21 @@ class Agent:
                 else:
                     sticky.append(r)
             self._pending_reminders = sticky
+
+        # 5) v1.1.1: hook prompt slot=temp — 一次性消费,append 后立即清空
+        if self._temp_reminders:
+            for body in self._temp_reminders:
+                reminders.append(
+                    Message(
+                        role="user",
+                        content=(
+                            '<system-reminder type="hook_prompt" ttl="once">\n'
+                            f"{body}\n"
+                            "</system-reminder>"
+                        ),
+                    )
+                )
+            self._temp_reminders = []
 
         if not reminders:
             return list(messages)

@@ -19,7 +19,7 @@ sub-agent:
 prompt:
 - slot=sticky_reminder(默认)→ agent.enqueue_reminder(kind="hook_prompt", body, ttl)
 - slot=stable_system → agent.set_dynamic_section("hook_overrides", content)
-- slot=temp → agent_state.temp_reminders(下轮消失)
+- slot=temp → agent._temp_reminders(下轮 _inject_reminders 消费即清)
 - enqueue=False → 仅 log.info
 
 shell action 不允许 deny / parse_expr(Pydantic extra="forbid" 挡住);同理 prompt。
@@ -224,16 +224,13 @@ async def execute_prompt(action: _PromptAction, ctx: "HookContext") -> ActionRes
             raise HookSlotError(f"stable_system 注入失败: {exc}") from exc
         return ActionResult(deny=False, enqueue_body=body)
 
-    # slot == "temp"
+    # slot == "temp" — 一次性 reminder,append 到 agent._temp_reminders,
+    # 下轮 _inject_reminders 消费即清(详见 Agent._inject_reminders step 5)
     if ctx.agent is None:
         return ActionResult(deny=False)
-    state = getattr(ctx.agent, "state", None) or getattr(ctx.agent, "_state", None)
-    if state is None:
-        log.warning("hook %s 无法找到 agent state 注入 temp reminder", ctx.hook_id)
-        return ActionResult(deny=False)
-    temp_list = getattr(state, "temp_reminders", None)
+    temp_list = getattr(ctx.agent, "_temp_reminders", None)
     if temp_list is None:
-        log.warning("hook %s agent.state 没有 temp_reminders 字段", ctx.hook_id)
+        log.warning("hook %s agent 没有 _temp_reminders 字段,跳过 temp 注入", ctx.hook_id)
         return ActionResult(deny=False)
     temp_list.append(body)
     return ActionResult(deny=False, enqueue_body=body)

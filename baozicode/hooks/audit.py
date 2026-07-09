@@ -1,4 +1,4 @@
-"""Hook 审计日志:JSONL 写入 .baozicode/audit.log。
+"""Hook 审计日志:JSONL 写入 .baozicode/hooks/<session_id>.audit.jsonl。
 
 HookInvocation dataclass:
   timestamp / event / hook_id / action_kind / tool_name / tool_call_id /
@@ -6,8 +6,12 @@ HookInvocation dataclass:
 
 写入策略:
 - aiofiles append,无 fsync(避免阻塞主循环)
-- 启动期检查 size,超过 100MB → rotate 到 audit.log.YYYYMMDD-HHMMSS
+- 启动期检查 size,超过 100MB → rotate 到 <original>.YYYYMMDD-HHMMSS
 - Agent.run finally 块写一条 final invocation(action_kind="pipeline")
+
+路径约定(v1.1.1 起,与 app.py:bootstrap_hooks 一致):
+  <project_root>/.baozicode/hooks/<session_id>.audit.jsonl
+  其中 session_id 格式为 YYYYMMDD-HHMMSS-xxxx(20 字符)
 """
 from __future__ import annotations
 

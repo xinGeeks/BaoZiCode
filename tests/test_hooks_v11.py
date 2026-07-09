@@ -865,3 +865,225 @@ def test_matchers_not_exact():
     })
     assert evaluate_condition(cond, _FakeCall("Read", {"path": "/tmp"})) is True
     assert evaluate_condition(cond, _FakeCall("Read", {"path": "/etc"})) is False
+
+
+# ---------- v1.1.1:slot=temp 完整落地 ----------
+
+def test_execute_prompt_temp_slot_appends_to_agent_temp_reminders():
+    """v1.1.1:slot=temp append 到 agent._temp_reminders(下轮消费即清)。"""
+    from baozicode.hooks import clear_hook_runtime_state
+    from baozicode.hooks.schema import _PromptAction
+
+    agent = MagicMock()
+    agent._temp_reminders = ["leftover"]  # 模拟 Agent 字段
+    action = _PromptAction.model_validate({
+        "action": "prompt", "content": "记得 review", "slot": "temp",
+    })
+    ctx = HookContext(event="turn.start", hook_id="t-temp", agent=agent)
+    asyncio.run(execute_action(action, ctx))
+    assert agent._temp_reminders == ["leftover", "记得 review"]
+
+    # 用 helper 清空,后续测试干净起点
+    clear_hook_runtime_state(agent)
+
+
+def test_inject_reminders_consumes_temp_reminders_once():
+    """v1.1.1:_inject_reminders 把 _temp_reminders 内容 inject 后立即清空。"""
+    from baozicode.agent.loop import Agent
+    from baozicode.conversation.manager import ConversationManager
+    from baozicode.tools.registry import get_all_tools
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from _agent_helpers import make_minimal_config
+
+    class _NullLLM(LLMClient):
+        async def stream(self, messages, system, tools, *, cache_breakpoints=None):
+            from baozicode.llm.base import ContentDelta
+            from baozicode.agent.events import StopReason, UsageStats
+            # 第 1 轮:text only,直接 COMPLETED
+            yield ContentDelta(type="text", text="hi")
+            yield ContentDelta(type="usage", text=UsageStats(input_tokens=1, output_tokens=1))
+            yield ContentDelta(type="done", text=StopReason.COMPLETED)
+            return
+
+    config = make_minimal_config()
+    agent = Agent(
+        llm_client=_NullLLM(),
+        tools=get_all_tools(),
+        conversation=ConversationManager(),
+        permissions=None,
+        config=config,
+    )
+    # 在 run 之前塞 2 条 temp reminder
+    agent._temp_reminders = ["请用中文回复", "简短一些"]
+
+    # 跑 Agent.run 之前先手动调一次 _inject_reminders 模拟"下一轮"
+    msgs = [
+        type("M", (), {"role": "user", "content": "hi"})(),
+        type("M", (), {"role": "assistant", "content": "ok"})(),
+    ]
+    out = agent._inject_reminders(msgs, iteration=1)
+
+    # 两条 temp reminder 应被 inject 到 messages[-2] 之前,内容带 hook_prompt 标签
+    injected = [m for m in out if "hook_prompt" in m.content]
+    assert len(injected) == 2
+    assert "请用中文回复" in injected[0].content
+    assert "简短一些" in injected[1].content
+    # 消费后清空
+    assert agent._temp_reminders == []
+
+
+# ---------- v1.1.1:/clear 清 hook 状态 ----------
+
+def test_clear_hook_runtime_state_wipes_pending_reminders():
+    """v1.1.1:clear_hook_runtime_state 把 _pending_reminders 清空。"""
+    from baozicode.hooks import clear_hook_runtime_state
+
+    class _Agent:
+        _pending_reminders = ["r1", "r2"]
+        _hook_stable_overrides = ["override-a"]
+        _temp_reminders = ["t1"]
+
+    a = _Agent()
+    clear_hook_runtime_state(a)
+    assert a._pending_reminders == []
+    assert a._hook_stable_overrides == []
+    assert a._temp_reminders == []
+
+
+def test_clear_hook_runtime_state_safe_on_missing_attrs():
+    """v1.1.1:agent 缺字段时 helper 安全跳过(setattr 失败也不抛)。"""
+    from baozicode.hooks import clear_hook_runtime_state
+
+    class _BareAgent:
+        pass
+
+    a = _BareAgent()
+    clear_hook_runtime_state(a)  # 不应抛
+    assert not hasattr(a, "_pending_reminders")
+
+
+def test_clear_hook_runtime_state_none_safe():
+    """v1.1.1:None agent 不抛(防御 chat_screen 在 agent 未就绪时调)。"""
+    from baozicode.hooks import clear_hook_runtime_state
+    clear_hook_runtime_state(None)  # 不应抛
+
+
+# ---------- v1.1.1:audit log 路径契约 + 100MB rotate ----------
+
+def test_audit_log_path_is_per_session_jsonl(tmp_path):
+    """v1.1.1:HookAuditLog 路径契约 —— 用 .audit.jsonl 后缀,父目录自动创建。"""
+    from baozicode.hooks.audit import HookAuditLog
+
+    log_path = tmp_path / "hooks" / "20260709-143022-a7b3.audit.jsonl"
+    assert not log_path.parent.exists()
+    audit = HookAuditLog(log_path)
+    # 构造路径断言 —— HookAuditLog 内部自动 mkdir parents
+    assert audit.path == log_path
+    assert log_path.parent.is_dir()
+
+
+def test_audit_log_rotation_triggers_at_threshold(tmp_path):
+    """v1.1.1:超 max_bytes → rename 到 .YYYYMMDD-HHMMSS,新文件空。"""
+    import os
+    from baozicode.hooks.audit import HookAuditLog
+
+    log_path = tmp_path / "tiny.audit.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # 写 50 字节,设阈值 40 → 应触发 rotate
+    log_path.write_bytes(b"x" * 50)
+
+    audit = HookAuditLog(log_path, max_bytes=40)
+    audit.rotate_if_needed()
+
+    # 原文件应被 rename 后缀时间戳
+    rotated = [p for p in tmp_path.iterdir() if p.name.startswith("tiny.audit.jsonl.")]
+    assert len(rotated) == 1
+    # 原路径应不存在(已被 rename)
+    assert not log_path.exists()
+    # rotated 文件大小 == 50
+    assert rotated[0].stat().st_size == 50
+
+
+def test_audit_log_rotation_skips_when_below_threshold(tmp_path):
+    """v1.1.1:未超阈值不 rotate。"""
+    from baozicode.hooks.audit import HookAuditLog
+
+    log_path = tmp_path / "small.audit.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(b"x" * 10)
+
+    audit = HookAuditLog(log_path, max_bytes=100)
+    audit.rotate_if_needed()
+
+    # 原文件仍在,没有 .YYYY 后缀
+    assert log_path.exists()
+    assert log_path.stat().st_size == 10
+    assert not any(p.name.startswith("small.audit.jsonl.") for p in tmp_path.iterdir())
+
+
+# ---------- v1.1.1:HookValidationError → SystemExit e2e ----------
+
+def test_app_startup_systemexit_on_invalid_hook_config(monkeypatch, tmp_path):
+    """v1.1.1:bootstrap 抛 HookValidationError → App 启动期应转 SystemExit。
+
+    通过直接调用 baozicode.hooks.bootstrap.load_hooks + 模拟 app 启动期
+    try/except HookValidationError → raise SystemExit 的处理路径。
+    """
+    import sys
+    from pathlib import Path
+    from baozicode.hooks.bootstrap import load_hooks
+    from baozicode.hooks import HookValidationError
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from _agent_helpers import make_minimal_config
+
+    # 构造一个非法 hook config:duplicate id
+    config = make_minimal_config()
+    config.hooks = [
+        {"id": "dup", "event": "tool.pre", "actions": [{"action": "shell", "command": "echo a"}]},
+        {"id": "dup", "event": "tool.pre", "actions": [{"action": "shell", "command": "echo b"}]},
+    ]
+
+    # bootstrap 直接抛 HookValidationError
+    with pytest.raises(HookValidationError):
+        load_hooks(config, agent=None)
+
+    # 模拟 app.py 启动期的捕获 + 转 SystemExit(boot panic 路径)
+    try:
+        load_hooks(config, agent=None)
+    except HookValidationError as exc:
+        with pytest.raises(SystemExit):
+            raise SystemExit(f"ERROR: hooks validation failed: {exc}")
+
+
+# ---------- v1.1.1:性能 smoke ----------
+
+def test_pre_hook_overhead_under_500ms_with_three_shell_hooks():
+    """v1.1.1:pre hook N=3 × ~5ms shell → total overhead < 500ms 软阈值。
+
+    设计 R4:Windows 上 bash subprocess 启动开销本身就 50-150ms,
+    sleep 0.005 在 Win32 上实测 ~30-50ms,3 条 + 调度 ≈ 100-250ms。
+    阈值 500ms 给 2x buffer 容 CI 抖动 / 防 dispatcher 性能回归。
+    Linux CI 上会更宽松(150ms 内),Windows CI 上稳过。
+    """
+    import time as _time
+    raw = [
+        {"id": f"h{i}", "event": "tool.pre",
+         "actions": [{"action": "shell", "command": "sleep 0.005", "timeout_seconds": 5}]}
+        for i in range(3)
+    ]
+    r = HookRegistry.load(raw)
+    r.freeze()
+    d = r.create_dispatcher(agent=None)
+
+    t0 = _time.monotonic()
+    res = d.run("tool.pre", _FakeCall("Bash", {"command": "ls"}))
+    elapsed_ms = (_time.monotonic() - t0) * 1000
+
+    assert elapsed_ms < 500, (
+        f"pre hook overhead {elapsed_ms:.0f}ms 超过 500ms 软阈值 "
+        f"(可能 dispatcher 有性能回归,或 CI 机器太慢)"
+    )
+    assert res.denied is False

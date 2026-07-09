@@ -656,6 +656,9 @@ class ChatScreen(Screen):
         skill_set = getattr(app, "skills", None)
         if skill_set is not None:
             skill_set.activation.clear()
+        # v1.1.1:/clear 同时清掉 hook 注入的 3 类运行时状态(definition 保留)
+        from baozicode.hooks import clear_hook_runtime_state
+        clear_hook_runtime_state(getattr(app, "agent", None))
         scroll = self.query_one("#chat-scroll", VerticalScroll)
         for child in list(scroll.children):
             if child.id not in ("banner", "welcome"):

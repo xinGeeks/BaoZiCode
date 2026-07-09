@@ -248,7 +248,7 @@ python -m baozicode                # 等价
 | 命令 | 类型 | 说明 |
 |------|------|------|
 | `/help` | LOCAL | 列出 11 个内置命令,描述 + usage |
-| `/clear` | UI_STATE | 清空对话历史 + session 用量 + 已激活 Skill |
+| `/clear` | UI_STATE | 清空对话历史 + session 用量 + 已激活 Skill + hook 注入状态(v1.1.1 起同时清 sticky hook_prompt reminder / `## Hook Overrides` 段 / temp reminder,见 `clear_hook_runtime_state`) |
 | `/compact` | UI_STATE | 手动触发上下文压缩(v0.7:Layer 1 offload + Layer 2 摘要) |
 | `/plan` | UI_STATE | **严格动词**:切 plan_mode=True(args 静默忽略) |
 | `/do` | UI_STATE | **严格动词**:切 plan_mode=False(args 静默忽略) |
