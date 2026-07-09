@@ -1,11 +1,16 @@
-"""v1.0 Skills — SkillExecutor 双模式执行单元测试。
+"""v1.0/v1.2 Skills — SkillExecutor 双模式执行单元测试。
+
+v1.2 重写:SkillExecutor 不再走 `independent_runner` 回调,而是直接构造
+in-memory AgentDef 注册到 SubAgentManager._runtime._registry._defs 然后调
+`dispatch(type="definition", role=name, async_=True)`。本测试用桩 SubAgentManager
+覆盖两条路径(成功 / 失败 / 无 manager)。
 
 覆盖:
 - SkillExecutionResult dataclass + mode 字段
 - execute() 模式分发(shared / independent)
 - shared 路径 → loader.load_skill + 返回 LoadSkillResult 摘要
-- independent 路径 → runner stub 返回 text → 包成 SkillExecutionResult
-- independent 缺 runner / runner 抛错 → ok=False 但 summary 含诊断
+- independent 路径 → SubAgentManager stub 返回 text → 包成 SkillExecutionResult
+- independent 缺 manager → ok=False 但 summary 含诊断
 - SkillLoader.execute 走 executor(独立模式 OK)+ 不走 executor(降级)
 - SkillActivation 斜杠对独立 Skill:有 independent_invoke → 走 invoke;
   无 → 退回 shared 行为(返回 body)
@@ -13,7 +18,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,6 +32,76 @@ from baozicode.skills.execution import (
 )
 from baozicode.skills.loader import SkillLoader
 from baozicode.skills.schema import parse_frontmatter
+
+
+# ---- SubAgentManager 桩 ----
+
+
+class _StubTask:
+    def __init__(
+        self,
+        *,
+        state: str,
+        result: str = "",
+        error: str | None = None,
+    ) -> None:
+        self.state = state
+        self.result = result
+        self.error = error
+
+
+class _StubRegistry:
+    def __init__(self) -> None:
+        self._defs: dict[str, Any] = {}
+
+
+class _StubRuntime:
+    def __init__(self) -> None:
+        self._registry = _StubRegistry()
+
+
+class _StubSubAgentManager:
+    """最小桩:模拟 SubAgentManager 接口,SkillExecutor 调用。
+
+    `dispatch(...)` 同步返回 task_id(str);`get_task(task_id)` 返回 task 对象
+    (SkillExecutor 内部轮询 task.state 到 terminal)。
+    """
+
+    def __init__(
+        self,
+        *,
+        result: str = "stub summary text",
+        state: str = "done",
+        error: str | None = None,
+    ) -> None:
+        self._runtime = _StubRuntime()
+        self._next_id = 0
+        self._tasks: dict[str, _StubTask] = {}
+        self._result = result
+        self._state = state
+        self._error = error
+        self.dispatched: list[dict[str, Any]] = []
+
+    def dispatch(  # noqa: A002
+        self,
+        *,
+        type: str,  # noqa: A002
+        role: str,
+        prompt: str,
+        async_: bool = True,
+    ) -> str:
+        self._next_id += 1
+        task_id = f"stub-{self._next_id}"
+        self._tasks[task_id] = _StubTask(
+            state=self._state, result=self._result, error=self._error,
+        )
+        self.dispatched.append(
+            {"type": type, "role": role, "prompt": prompt, "async_": async_}
+        )
+        return task_id
+
+    def get_task(self, task_id: str) -> _StubTask | None:
+        return self._tasks.get(task_id)
 
 
 # ---- helpers ----
@@ -49,7 +126,7 @@ def _make_sd(text: str):
     return _Stub()
 
 
-class _StubRegistry:
+class _StubRegistrySkill:
     def __init__(self, sd):
         self._sd = sd
 
@@ -62,12 +139,17 @@ class _StubRegistry:
 def _loader_pair(sd):
     """构造 (SkillLoader, SkillActivation) 对。"""
     activation = SkillActivation(CommandRegistry())
-    loader = SkillLoader(_StubRegistry(sd), activation)
+    loader = SkillLoader(_StubRegistrySkill(sd), activation)
     return loader, activation
 
 
-def _make_executor(loader, activation, *, runner=None):
-    return SkillExecutor(loader, activation, independent_runner=runner)
+def _make_executor(
+    loader,
+    activation,
+    *,
+    manager: _StubSubAgentManager | None = None,
+):
+    return SkillExecutor(loader, activation, subagent_manager=manager)
 
 
 # ---- SkillExecutionResult ----
@@ -132,55 +214,42 @@ class TestIndependentMode:
         )
 
     @pytest.mark.asyncio
-    async def test_independent_with_runner(self) -> None:
+    async def test_independent_dispatches_and_returns(self) -> None:
         sd = self._ind_sd()
         loader, activation = _loader_pair(sd)
-
-        async def runner(sd_, args):
-            return "raw summary text"
-
-        executor = _make_executor(loader, activation, runner=runner)
+        manager = _StubSubAgentManager(result="stub summary text")
+        executor = _make_executor(loader, activation, manager=manager)
         result = await executor.execute("review")
         assert result.ok is True
         assert result.mode == "independent"
-        assert "raw summary text" in result.summary
-        assert result.raw_output == "raw summary text"
+        assert result.summary.startswith("[review 子对话摘要]")
+        assert "stub summary text" in result.summary
+        assert result.raw_output == "stub summary text"
         assert activation.is_active("review") is True
+        # dispatch 调用记录
+        assert len(manager.dispatched) == 1
+        assert manager.dispatched[0]["type"] == "definition"
+        assert manager.dispatched[0]["role"] == "review"
+        assert manager.dispatched[0]["async_"] is True
 
     @pytest.mark.asyncio
-    async def test_independent_receives_args(self) -> None:
+    async def test_independent_no_manager_fails(self) -> None:
         sd = self._ind_sd()
         loader, activation = _loader_pair(sd)
-
-        seen: dict = {}
-
-        async def runner(sd_, args):
-            seen["args"] = args
-            return "summary"
-
-        executor = _make_executor(loader, activation, runner=runner)
-        await executor.execute("review", args={"since": "yesterday"})
-        assert seen["args"] == {"since": "yesterday"}
-
-    @pytest.mark.asyncio
-    async def test_independent_no_runner_fails(self) -> None:
-        sd = self._ind_sd()
-        loader, activation = _loader_pair(sd)
-        executor = _make_executor(loader, activation, runner=None)
+        executor = _make_executor(loader, activation, manager=None)
         result = await executor.execute("review")
         assert result.ok is False
         assert result.mode == "independent"
-        assert "independent_runner" in result.summary
+        assert "SubAgentManager" in result.summary
 
     @pytest.mark.asyncio
-    async def test_independent_runner_raises_fails_gracefully(self) -> None:
+    async def test_independent_task_failed_returns_error(self) -> None:
         sd = self._ind_sd()
         loader, activation = _loader_pair(sd)
-
-        async def runner(sd_, args):
-            raise RuntimeError("LLM timeout")
-
-        executor = _make_executor(loader, activation, runner=runner)
+        manager = _StubSubAgentManager(
+            state="failed", error="LLM timeout"
+        )
+        executor = _make_executor(loader, activation, manager=manager)
         result = await executor.execute("review")
         assert result.ok is False
         assert "LLM timeout" in result.summary
@@ -189,11 +258,8 @@ class TestIndependentMode:
     async def test_independent_empty_output(self) -> None:
         sd = self._ind_sd()
         loader, activation = _loader_pair(sd)
-
-        async def runner(sd_, args):
-            return ""
-
-        executor = _make_executor(loader, activation, runner=runner)
+        manager = _StubSubAgentManager(result="")
+        executor = _make_executor(loader, activation, manager=manager)
         result = await executor.execute("review")
         assert result.ok is True
         assert "无输出" in result.summary
@@ -222,47 +288,25 @@ class TestLoaderDispatches:
     async def test_loader_dispatches_independent_to_executor(self) -> None:
         sd = self._ind_sd()
         activation = SkillActivation(CommandRegistry())
-        loader = SkillLoader(_StubRegistry(sd), activation)
-        runner_calls: list = []
-
-        async def runner(sd_, args):
-            runner_calls.append(args)
-            return "summary A"
-
-        executor = SkillExecutor(loader, activation, independent_runner=runner)
+        loader = SkillLoader(_StubRegistrySkill(sd), activation)
+        manager = _StubSubAgentManager(result="summary A")
+        executor = _make_executor(loader, activation, manager=manager)
         loader._executor = executor
         result = await loader.execute({"name": "review"})
         assert not result.is_error
         assert "summary A" in result.content
-        assert runner_calls == [{}]  # args 默认空 dict
+        assert len(manager.dispatched) == 1
+        assert manager.dispatched[0]["type"] == "definition"
 
     @pytest.mark.asyncio
     async def test_loader_falls_back_to_load_skill_when_no_executor(self) -> None:
         sd = self._shared_sd()
         activation = SkillActivation(CommandRegistry())
-        loader = SkillLoader(_StubRegistry(sd), activation)
+        loader = SkillLoader(_StubRegistrySkill(sd), activation)
         # executor 未设置 → 退到 load_skill 路径
         result = await loader.execute({"name": "commit"})
         assert not result.is_error
         assert "commit" in result.content
-
-    @pytest.mark.asyncio
-    async def test_loader_passes_args_through_executor(self) -> None:
-        sd = self._ind_sd()
-        activation = SkillActivation(CommandRegistry())
-        loader = SkillLoader(_StubRegistry(sd), activation)
-        received: list = []
-
-        async def runner(sd_, args):
-            received.append(args)
-            return f"got {args}"
-
-        executor = SkillExecutor(loader, activation, independent_runner=runner)
-        loader._executor = executor
-        await loader.execute(
-            {"name": "review", "args": {"since": "yesterday"}}
-        )
-        assert received == [{"since": "yesterday"}]
 
 
 # ---- SkillActivation 斜杠集成 ----

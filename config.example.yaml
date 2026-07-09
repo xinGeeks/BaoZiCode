@@ -441,3 +441,29 @@ hooks:
           reason: "$EVENT_REASON"
           iteration: "$EVENT_ITERATION"
         parse_expr: 'res.deny = res.status == 500'
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.2 subagents — 主 Agent 派 sub-Agent 的配置
+# 不写本块则走默认:enabled=true, max_concurrent=5, 其它全部默认
+# ─────────────────────────────────────────────────────────────────────
+subagents:
+  enabled: true
+  max_concurrent: 5
+  default_timeout_seconds: 300
+  task_retention_minutes: 5
+  plugins_enabled: true
+  background_whitelist:
+    - Read
+    - Grep
+    - Glob
+    - WebFetch
+    - notify_complete
+
+  # builtin_dir / user_dir / project_dir 留 None 时走默认:
+  # builtin_dir  = <pkg>/baozicode/agents/builtin
+  # user_dir     = ~/.config/baozicode/agents
+  # project_dir  = <project>/.baozicode/agents
+  # builtin_dir: null
+  # user_dir: null
+  # project_dir: null
+

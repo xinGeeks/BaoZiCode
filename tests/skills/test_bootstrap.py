@@ -206,7 +206,7 @@ class TestSkillSetFactory:
         filt = ss.build_skill_filter(ToolsReg())
         assert isinstance(filt, SkillWhitelistFilter)
 
-    def test_executor_independent_runner_none_by_default(self, tmp_path: Path) -> None:
-        """默认 independent_runner=None(executor 仍可用,但独立模式会失败提示)。"""
+    def test_executor_subagent_manager_none_by_default(self, tmp_path: Path) -> None:
+        """默认 subagent_manager=None(executor 仍可用,但独立模式会失败提示)。"""
         ss = bootstrap_skills(tmp_path, tool_registry=None)
-        assert ss.executor._independent_runner is None
+        assert ss.executor._subagent_manager is None

@@ -72,6 +72,28 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   - 详细迁移 + 字段表 + 11 个事件清单 + 6 种 action 详解 + 10 个 FAQ 见
     `docs/migrations/v1.0-to-v1.1.md`,v1.2 polish 见 `docs/migrations/v1.1-to-v1.2.md`
 
+- ✅ **SubAgent 委派(v1.2 新增 — 主特性)** — `baozicode/agents/`
+  - 主 Agent 通过统一的 `task` 工具,把子任务派给独立 sub-Agent。每个
+    sub-Agent 跑独立 `ConversationManager` + 独立权限追踪 + 受限工具集
+  - **definition 模式**:派独立角色(基于 `AGENT.md` frontmatter 定义的角色)
+    跑任务,默认 `async: true` 后台跑,跑完结果摘要回流
+  - **fork 模式**:复用主 Agent 历史(prompt cache byte-identical 命中,省钱),
+    强制后台运行
+  - **4 层 AND 工具过滤**:`GLOBAL_DENY={task}` 硬禁嵌套 → `role.tools`
+    角色白名单 → `role.tools-deny` 角色黑名单 → 后台模式
+    `background_whitelist`(默认 Read/Grep/Glob/WebFetch/notify_complete)
+  - **加载优先级(同名覆盖)**:项目 `.baozicode/agents/` > 用户
+    `~/.config/baozicode/agents/` > 内置 `<pkg>/baozicode/agents/builtin/`(2 个
+    样板 `explorer` / `summarizer`)> MCP plugin(server 暴露 `agents://list`)
+  - **Skill 独立模式打通**:v1.0 SkillExecutor 独立模式重写走 SubAgent 通道
+    (旧 `IndependentRunner` 注入路径删除,见迁移指南)
+  - **TUI 集成**:状态栏 `[agents: R/D/F]` 实时统计;`SubAgentCard` 折叠卡片
+    点击展开看 sub-Agent streaming text;完成时 `App.notify` 弹 toast
+  - **2 个内置样板 agent**:只读 `explorer`(Read/Grep/Glob/WebFetch) +
+    `summarizer`(Read/Grep/Glob + haiku,适合长篇压缩)
+  - 详细迁移 + 字段表 + 4 条派发路径详解 + 8 个 FAQ 见
+    `docs/migrations/v1.1-to-v1.2.md`
+
 - ✅ **Skill 系统(v1.0 新增)** — `baozicode/skills/`
   - 把可复用 AI 操作封装成独立 Markdown 文件 + YAML frontmatter,3 个内置
     (`commit` / `review` / `test`),三级存放 project > user > builtin
@@ -322,6 +344,55 @@ history-bubbles: 3                         # 独立模式带几条历史进子�
 ---
 根据 `git diff --staged` 生成 conventional commit message 并执行 commit。
 
+## SubAgent 委派(v1.2)
+
+主 Agent 通过 `task` 工具把子任务派给隔离的 **sub-Agent** — 每个 sub-Agent 跑独立
+对话上下文、用受限工具集、有独立权限追踪。子 Agent 跑完结果异步回流主 Agent,
+主对话历史不再被 sub-tool 调用污染。
+
+### 两条派发路径
+
+- **definition 模式** — 派独立角色跑 AgentDef.frontmatter
+  ```
+  {"type": "definition", "role": "explorer",
+   "prompt": "扫 src/ 列出所有 .py 文件", "async": true}
+  ```
+- **fork 模式** — 共享主 Agent 历史(prompt cache 命中,省钱)
+  ```
+  {"type": "fork", "prompt": "基于上面结果筛匹配 pattern X 的文件"}
+  ```
+
+> `async: true`(默认)→ 派完即返回 task_id 后台跑;`async: false` 阻塞等结果
+> (可设 `timeout_seconds` 超时自动切后台);**fork 强制后台**(sync 路径 warning 后强制 async)。
+
+### 角色定义
+
+```markdown
+<!-- ~/.config/baozicode/agents/explorer/AGENT.md -->
+---
+name: explorer
+description: 只读探索仓库
+tools: [Read, Grep, Glob, WebFetch]
+model: sonnet
+max-iterations: 8
+permission-mode: permissive
+---
+你是只读探索 agent。禁止任何写操作,禁止 sub-Agent 嵌套(task 工具被硬禁)。
+```
+
+**加载优先级**(同名覆盖):项目 `.baozicode/agents/` > 用户 `~/.config/baozicode/agents/`
+> 内置 `<pkg>/baozicode/agents/builtin/` > MCP plugin(server 暴露 `agents://list`)。
+
+**工具过滤 4 层 AND**:`GLOBAL_DENY={task}` → `role.tools` → `role.tools-deny`
+→ `background_whitelist`(默认 Read/Grep/Glob/WebFetch/notify_complete)。任一层空集 → 拒绝派发。
+
+**状态回流**:
+- 主 Agent idle → 直接 `add_user("[role 子对话结果]\n...")` 进主对话
+- 主 Agent running → 走 `enqueue_reminder("subagent_result")` 下轮顶部消费
+- 任一终态 → TUI 弹 `App.notify` toast + `SubAgentCard` 折叠卡片(点开展开)
+
+详细:[docs/migrations/v1.1-to-v1.2.md](./docs/migrations/v1.1-to-v1.2.md)
+
 ## SOP
 1. 调 `Bash` 跑 `git diff --staged --stat`
 2. 调 `Bash` 跑 `git diff --staged`
@@ -530,7 +601,7 @@ baozicode/
 │   ├── registry.py         # SkillRegistry(三级 scan + priority merge + reload)
 │   ├── activation.py       # SkillActivation(render_active_section + clear)
 │   ├── loader.py           # SkillLoader(load_skill + 占位符替换 + L1 校验)
-│   ├── execution.py        # SkillExecutor(shared / independent runner 注入点)
+│   ├── execution.py        # SkillExecutor(shared / independent 走 SubAgent 通道 — v1.2)
 │   ├── whitelist.py        # SkillWhitelistFilter(L2 union + system 工具豁免)
 │   ├── bootstrap.py        # bootstrap_skills() + SkillSet 聚合
 │   ├── load_skill_tool.py  # load_skill tool 定义 + 执行器注册
@@ -538,12 +609,25 @@ baozicode/
 │       ├── commit/SKILL.md # shared, allowed-tools: [Bash, Read]
 │       ├── review/SKILL.md # independent, history-bubbles: 3
 │       └── test/SKILL.md   # independent, history-bubbles: 2
+├── agents/                 # v1.2 新增 — SubAgent Delegation
+│   ├── schema.py           # AgentFrontmatter(Pydantic) / AgentDef / parse_agent
+│   ├── registry.py         # AgentRegistry(3 级 scan + 优先级合并 + plugin 合并)
+│   ├── loader.py           # substitute_placeholders({var} / {var:default})
+│   ├── filter.py           # ToolFilter(4 层 AND + GLOBAL_DENY={task} + cache)
+│   ├── runtime.py          # SubAgentRuntime(spawn — 状态隔离 + BuiltPrompt 分流)
+│   ├── manager.py          # SubAgentManager(dispatch 派发 + 状态机 + cascade cancel)
+│   ├── plugin.py           # fetch_plugin_agents(MCP resources/read 协议)
+│   ├── task_tool.py        # TASK_TOOL + task_executor(暴露给主 Agent)
+│   └── builtin/            # 2 个样板 sub-Agent
+│       ├── explorer/AGENT.md  # definition + tools=[Read,Grep,Glob,WebFetch]
+│       └── summarizer/AGENT.md  # definition + model=haiku
 ├── tui/
-│   ├── chat_screen.py      # 主对话屏幕（订阅 Agent 事件流 + 11 slash 命令 + 状态栏）
+│   ├── chat_screen.py      # 主对话屏幕(订阅 Agent 事件流 + 状态栏 [agents: ...] + 0.5s 轮询 sub-Agent)
 │   ├── tool_card.py        # ToolCallCard / ToolResultCard
+│   ├── subagent_card.py    # v1.2 — SubAgentCard 折叠卡片(点击展开 last_text)
 │   ├── permission_modal.py # 高风险工具确认弹窗
 │   ├── banner.py           # ASCII 包子
-│   └── styles.tcss         # Textual 样式（含 StatusBar）
+│   └── styles.tcss         # Textual 样式(含 StatusBar + SubAgentCard)
 ├── llm/
 │   ├── base.py              # LLMClient 抽象 / Message / ContentBlock / ContentDelta
 │   ├── anthropic.py         # Anthropic 后端（tool_use + message_delta.usage）

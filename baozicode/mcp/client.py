@@ -207,6 +207,39 @@ class McpSession:
             raise McpError(f"tools/call {name!r} returned non-dict result")
         return McpCallResult.from_raw(result)
 
+    async def read_resource(self, uri: str) -> dict[str, Any]:
+        """v1.2:发 `resources/read` 请求,返回原始 result dict。
+
+        MCP 的 `resources/read` 协议响应格式:
+        ```json
+        {"contents": [{"uri": "...", "mimeType": "...", "text": "..."}]}
+        ```
+        返回值不做 schema 校验 — caller(agent plugin loader)自行解析。
+
+        Raises:
+            McpError: 超时 / RPC 错误 / transport 异常
+        """
+        req, fut = self._dispatcher.make_request(
+            "resources/read",
+            params={"uri": uri},
+        )
+        await self._send_frame(req.to_frame())
+        try:
+            result = await asyncio.wait_for(fut, timeout=self._call_timeout_s)
+        except asyncio.TimeoutError as exc:
+            raise McpError(
+                f"resources/read {uri!r} timed out after {self._call_timeout_s}s",
+                code=-32000,
+            ) from exc
+        except RuntimeError as exc:
+            raise McpError(
+                f"resources/read {uri!r} failed: {exc}",
+                code=getattr(exc, "code", None),
+            ) from exc
+        if not isinstance(result, dict):
+            raise McpError(f"resources/read {uri!r} returned non-dict result")
+        return result
+
     # ---- 内部 helpers ----
 
     async def _send_frame(self, frame: dict[str, Any]) -> None:

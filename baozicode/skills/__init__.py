@@ -30,7 +30,6 @@ skills/ 不 import textual(在 chat_screen 注入);不 import llm/ 后端
 
 from baozicode.skills.activation import ActiveSkill, SkillActivation
 from baozicode.skills.execution import (
-    IndependentRunner,
     SkillExecutionResult,
     SkillExecutor,
 )
@@ -54,7 +53,6 @@ from baozicode.skills.whitelist import (
 
 __all__ = [
     "ActiveSkill",
-    "IndependentRunner",
     "LOAD_SKILL_TOOL",
     "LoadSkillResult",
     "MAX_HISTORY_BUBBLES",

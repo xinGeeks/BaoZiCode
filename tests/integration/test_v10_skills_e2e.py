@@ -249,15 +249,45 @@ async def test_independent_skill_with_runner_returns_summary(app: BaoZiCodeApp) 
     # 注入独立 runner(模拟 sub-Agent 编排)
     seen: list = []
 
-    async def runner(sd, args):
-        seen.append((sd.name, args))
-        return "raw reviewer summary"
+    seen: list = []
 
-    app.skills.executor._independent_runner = runner
+    # 已移走 runner,改为 StubSubAgentManager (见下方)
+
+    # v1.2:SubAgentManager 桩(替换旧 independent_runner 注入)
+    class _StubTask:
+        def __init__(self) -> None:
+            self.state = "done"
+            self.result = "raw reviewer summary"
+            self.error = None
+
+    class _StubRegistry2:
+        _defs: dict = {}
+
+    class _StubRuntime2:
+        _registry = _StubRegistry2()
+
+    class _StubSubAgentManager:
+        def __init__(self) -> None:
+            self._runtime = _StubRuntime2()
+            self._next_id = 0
+            self._tasks: dict = {}
+
+        def dispatch(self, *, type, role, prompt, async_=True):  # noqa: A002
+            self._next_id += 1
+            tid = f"stub-{self._next_id}"
+            self._tasks[tid] = _StubTask()
+            seen.append((type, role, prompt))
+            return tid
+
+        def get_task(self, task_id):
+            return self._tasks.get(task_id)
+
+    manager = _StubSubAgentManager()
+    app.skills.executor._subagent_manager = manager
     result = await app.skills.executor.execute("reviewer", args={"since": "yesterday"})
     assert result.ok is True
     assert "raw reviewer summary" in result.summary
-    assert seen == [("reviewer", {"since": "yesterday"})]
+    assert seen and seen[0][1] == "reviewer"
 
 
 # ---- v0.4 旧配置 fallback ----

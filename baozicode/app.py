@@ -172,6 +172,112 @@ class BaoZiCodeApp(App):
         # 在 ChatScreen 第一条消息前一定就绪)。
         self._load_skill_tool_registered: bool = False
 
+        # ---- v1.2:SubAgentManager ----
+        # enabled=False 时整层停用,SubAgentManager 设为 None,TASK_TOOL
+        # 不注册。enabled=True 时构造完整 pipeline:扫 4 级 agent + 拉 MCP plugin
+        # + 构造 SubAgentRuntime + SubAgentManager。
+        # mcp_manager 还没 bootstrap(由 on_mount 异步跑),所以 plugin 拉取
+        # 推后到 mcp bootstrap 之后(放在 _bootstrap_mcp worker 末尾)。
+        self.subagents: Any = None
+        self._task_tool_registered: bool = False
+        if config.subagents is None or config.subagents.enabled:
+            try:
+                self.subagents = self._build_subagent_manager(
+                    config=config,
+                    tool_registry=get_default_tool_registry(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                import logging as _logging
+                _logging.getLogger("baozicode.app").warning(
+                    "SubAgentManager bootstrap 失败: %s: %s",
+                    type(exc).__name__, exc,
+                )
+                self.subagents = None
+
+    def _build_subagent_manager(
+        self,
+        *,
+        config,
+        tool_registry,
+    ) -> Any:
+        """v1.2:扫描 4 级 Agent 目录 + 构造 SubAgentRuntime + SubAgentManager。
+
+        MCP plugin agent 拉到之后再追加(self.subagents._runtime._registry 加)
+        — 由 _bootstrap_mcp worker 完成后调 `add_plugin_agents` 触发。
+        """
+        from baozicode.agents import (
+            AgentRegistry,
+            SubAgentManager,
+            SubAgentRuntime,
+            emit_scan_warnings,
+        )
+
+        sa_cfg = config.subagents
+        builtin_dir = sa_cfg.builtin_dir if sa_cfg and sa_cfg.builtin_dir else None
+        user_dir = sa_cfg.user_dir if sa_cfg and sa_cfg.user_dir else None
+        project_dir = (
+            sa_cfg.project_dir if sa_cfg and sa_cfg.project_dir else None
+        )
+        # builtin_dir 默认走包内 builtin 目录
+        if builtin_dir is None:
+            from pathlib import Path as _P
+            builtin_dir = _P(__file__).parent / "agents" / "builtin"
+        # user_dir 默认走 ~/.config/baozicode/agents
+        if user_dir is None:
+            user_dir = _P("~/.config/baozicode/agents").expanduser()
+        # project_dir 默认走 <project>/.baozicode/agents
+        if project_dir is None:
+            project_dir = self.project_root / ".baozicode" / "agents"
+
+        valid_tools = {t.name for t in tool_registry.get_all_tools()}
+        reg = AgentRegistry.scan(
+            builtin_dir=builtin_dir,
+            user_dir=user_dir,
+            project_dir=project_dir,
+            plugin_agents=[],
+            valid_tools=valid_tools,
+        )
+        # 把 scan_errors 写到 stderr(boot banner 一致口径)
+        emit_scan_warnings(reg.scan_errors)
+
+        runtime = SubAgentRuntime(
+            llm=self.llm_client,
+            hooks=self.hook_dispatcher,
+            tool_registry=tool_registry,
+            project_root=self.project_root,
+            config=config,
+            registry=reg,
+        )
+        manager = SubAgentManager(
+            runtime=runtime,
+            main_conversation=self.conversation,
+            max_concurrent=sa_cfg.max_concurrent if sa_cfg else 5,
+            task_retention_minutes=sa_cfg.task_retention_minutes if sa_cfg else 5,
+            main_agent_ref=lambda: self._current_agent,
+        )
+        return manager
+
+    async def add_plugin_agents(self) -> None:
+        """v1.2:MCP bootstrap 完成后调 — 拉 plugin agent 并并入 registry。"""
+        if self.subagents is None:
+            return
+        if not self.mcp_manager:
+            return
+        from baozicode.agents import emit_scan_warnings, fetch_plugin_agents
+        try:
+            defs, errors = await fetch_plugin_agents(self.mcp_manager)
+        except Exception as exc:  # noqa: BLE001
+            import logging as _logging
+            _logging.getLogger("baozicode.app").warning(
+                "fetch_plugin_agents 失败: %s: %s",
+                type(exc).__name__, exc,
+            )
+            return
+        emit_scan_warnings(errors)
+        # 把每个 plugin AgentDef 灌进 registry(覆盖同名 builtin/user/project)
+        for ad in defs:
+            self.subagents._runtime._registry._defs[ad.name] = ad
+
     def on_mount(self) -> None:
         # v0.8:CLI 启动时若要求弹 session 选择器,先在 ChatScreen 之前 push
         if self.resume_target is not None:
@@ -190,6 +296,39 @@ class BaoZiCodeApp(App):
                 exclusive=True,
                 name="skill-load-skill-register",
             )
+        # v1.2:把 task 工具注册到 ToolRegistry(异步,首次 mount 跑一次)
+        if not self._task_tool_registered:
+            self.run_worker(
+                self._register_task_tool(),
+                exclusive=True,
+                name="subagent-task-tool-register",
+            )
+
+    async def _register_task_tool(self) -> None:
+        """v1.2:把 `task` 工具注册到模块级 ToolRegistry 单例。
+
+        tool_type="internal" 保证 Skill 白名单收窄时它仍可用(跟 load_skill 一致)。
+        注册幂等:重复调只会因撞名抛 ValueError,捕获并标记已注册。
+        manager_getter 用 late-binding,避免循环 import。
+        """
+        import logging
+        from baozicode.agents import TASK_TOOL, task_executor
+        from baozicode.tools import registry as tool_registry
+
+        try:
+            await tool_registry.register_tool(
+                TASK_TOOL,
+                lambda args: task_executor(
+                    args, manager_getter=lambda: self.subagents,
+                ),
+                source_label="SubAgent",
+            )
+        except ValueError as exc:
+            logging.getLogger("baozicode.app").debug(
+                "task tool 注册跳过: %s", exc,
+            )
+        finally:
+            self._task_tool_registered = True
 
     async def _startup_session_select(self) -> None:
         """v0.8 启动 session 选择流程:弹 StartupSessionScreen,根据返回值执行动作。
@@ -246,6 +385,15 @@ class BaoZiCodeApp(App):
                 "MCP bootstrap failed: %s: %s", type(exc).__name__, exc,
             )
             self.mcp_manager = None
+            return
+        # v1.2:MCP ready 后拉 plugin agent 并入 SubAgentManager registry
+        try:
+            await self.add_plugin_agents()
+        except Exception as exc:  # noqa: BLE001
+            import logging
+            logging.getLogger("baozicode.app").warning(
+                "add_plugin_agents failed: %s: %s", type(exc).__name__, exc,
+            )
 
     async def _register_load_skill_tool(self) -> None:
         """v1.0:把 load_skill tool 注册到模块级 ToolRegistry 单例。
@@ -428,6 +576,12 @@ class BaoZiCodeApp(App):
         self.conversation.clear()
         # 重置 token 计数
         self.session_usage = UsageStats()
+        # v1.2:清空 sub-Agent tasks(关掉 running + 重置 _tasks)
+        if self.subagents is not None:
+            try:
+                self.subagents.clear_tasks()
+            except Exception:  # noqa: BLE001
+                pass
         return new_sid
 
     def memory_status(self) -> dict[str, object]:

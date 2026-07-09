@@ -50,6 +50,7 @@ from baozicode.instructions import LoadedInstructions
 from baozicode.tools.base import ToolCall, ToolResult
 from baozicode.tui.banner import BAOZI_BANNER, WELCOME_TEMPLATE
 from baozicode.tui.permission_modal import PermissionChoice, PermissionModal
+from baozicode.tui.subagent_card import SubAgentCard
 from baozicode.tui.tool_card import ToolCallCard, ToolResultCard
 
 if TYPE_CHECKING:
@@ -290,6 +291,11 @@ class ChatScreen(Screen):
         self._previously_denied: set[tuple[str, str]] = set()
         # v0.5:本次会话累积拒绝次数(L1-L4 系统拒 + L5 用户拒),供 /status 展示
         self._session_deny_count: int = 0
+        # v1.2:sub-Agent 卡片状态机
+        # _subagent_cards — task_id → SubAgentCard 实例
+        self._subagent_cards: dict[str, SubAgentCard] = {}
+        # _subagent_toast_emitted — task_id 已弹 toast 的去重集合
+        self._subagent_toast_emitted: set[str] = set()
 
     # ---- layout ----
 
@@ -297,6 +303,8 @@ class ChatScreen(Screen):
         with VerticalScroll(id="chat-scroll"):
             yield Static(BAOZI_BANNER, id="banner")
             yield Static(id="welcome", classes="info-message")
+        # v1.2:sub-Agent 卡片面板,主对话下方。初始 hidden,首个 task 派发时显示。
+        yield Vertical(id="subagent-panel")
         yield StatusBar(id="status-bar")
         yield Input(
             placeholder="输入消息后回车发送（/help 查看命令）",
@@ -313,6 +321,8 @@ class ChatScreen(Screen):
         self.query_one("#input", Input).focus()
         # v0.9: 初始化命令 registry + context
         self._init_command_registry()
+        # v1.2:每 0.5s 轮询 subagents — 同步 status bar / 创建 / 刷新卡片 / 弹 toast
+        self.set_interval(0.5, self._poll_subagents, pause=False)
         self._update_status_bar(idle=True)
 
     # ---- input handling ----
@@ -1196,6 +1206,12 @@ class ChatScreen(Screen):
             skill_filter=skill_filter,
             skill_activation=skill_activation,
             skill_registry=skill_registry,
+            # v1.1:Hook 事件分发器(lazy import 写在内部方法,避免 module-load 污染)
+            hook_dispatcher=getattr(app, "hook_dispatcher", None),
+            # v1.2:SubAgentManager(供 task 工具 dispatch;主 Agent 自己注入,
+            # sub-Agent 不传 → _subagent_meta 区分)
+            subagent_manager=getattr(app, "subagents", None),
+            subagent_meta=None,  # 主 Agent 没有 subagent_meta
         )
         self._current_agent = agent
         app._current_agent = agent
@@ -1369,16 +1385,114 @@ class ChatScreen(Screen):
         else:
             mode_marker = "[DEFAULT]"
         auto_marker = "auto" if self.auto_mode else "ask"
+        # v1.2:sub-Agent 统计 — [agents: running/done] 段
+        agents_marker = ""
+        sub_mgr = getattr(app, "subagents", None)
+        if sub_mgr is not None:
+            try:
+                counts = sub_mgr.count_by_state()  # type: ignore[attr-defined]
+                running = counts.get("running", 0) + counts.get("pending", 0)
+                done = counts.get("done", 0) + counts.get("canceled", 0)
+                failed = counts.get("failed", 0)
+                agents_marker = f" [agents: {running}/{done}/{failed}]"
+            except Exception:
+                agents_marker = " [agents: --]"
+
         if idle:
             text = (
-                f"● {mode_marker} · {backend}/{model} · {auto_marker} · idle"
+                f"● {mode_marker} · {backend}/{model} · "
+                f"{auto_marker} · idle{agents_marker}"
             )
         else:
             text = (
                 f"● {mode_marker} · {backend}/{model} · {auto_marker} · "
-                f"{progress_text or '...'}"
+                f"{progress_text or '...'}{agents_marker}"
             )
         bar.update(text)
+
+    # ---- v1.2:sub-Agent 面板轮询 ----
+
+    def _poll_subagents(self) -> None:
+        """每 0.5s 触发:同步状态栏 + 创建/刷新/移除 sub-Agent 卡片 + 弹完成 toast。
+
+        依赖 `app.subagents` 提供 list_tasks() / count_by_state();
+        app.subagents 为 None(boot 失败)则静默退出。
+        """
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        sub_mgr = getattr(app, "subagents", None)
+        if sub_mgr is None:
+            return
+        try:
+            tasks = sub_mgr.list_tasks()  # type: ignore[attr-defined]
+        except Exception:
+            return
+
+        panel = self.query_one("#subagent-panel", Vertical)
+        # 当前活跃 task id 集合(供移除过期卡片用)
+        current_ids = {t.task_id for t in tasks}
+
+        # ---- 移除已不再 list 的卡片(retention 清掉 / 服务重启)----
+        for stale_id in list(self._subagent_cards):
+            if stale_id not in current_ids:
+                try:
+                    self._subagent_cards[stale_id].remove()
+                except Exception:
+                    pass
+                self._subagent_cards.pop(stale_id, None)
+                self._subagent_toast_emitted.discard(stale_id)
+
+        # ---- 逐 task 刷新 / 新建 ----
+        for task in tasks:
+            tid = task.task_id
+            card = self._subagent_cards.get(tid)
+            if card is None:
+                # 新建卡片 — 第一次见到这个 task
+                card = SubAgentCard(
+                    task_id=tid,
+                    role_label=task.role_label,
+                    type_label=task.type,
+                )
+                self._subagent_cards[tid] = card
+                panel.mount(card)
+            # 每次轮询都按当前 task 状态刷新(避免 last_text 延迟)
+            card.update_from_task(task)
+            # 终态 → 弹 toast(只在状态首次变 terminal 时弹一次)
+            if (
+                task.state in ("done", "failed", "canceled", "timeout")
+                and tid not in self._subagent_toast_emitted
+            ):
+                self._subagent_toast_emitted.add(tid)
+                self._notify_terminal(task)
+
+        # 面板空时 hidden,有 task 时显示
+        if self._subagent_cards:
+            panel.remove_class("-hidden")
+        else:
+            panel.add_class("-hidden")
+
+        # 终态后 30s 卸载卡片(retention 通过 list_tasks 自动剥离)
+        # 这里不主动删 — manager 已 own retention。卡片会跟 task 一起消失。
+
+    def _notify_terminal(self, task) -> None:
+        """sub-Agent 跑完 → App.notify 弹一个短 toast。"""
+        app: BaoZiCodeApp = self.app  # type: ignore[assignment]
+        label = task.role_label
+        if task.state == "done":
+            msg = f"✓ [{label}] 子对话完成"
+            severity = "information"
+        elif task.state == "failed":
+            msg = f"✗ [{label}] 失败:{task.error or 'unknown'}"
+            severity = "error"
+        elif task.state == "canceled":
+            msg = f"[{label}] 已取消"
+            severity = "warning"
+        else:  # timeout
+            msg = f"[{label}] 超时切后台"
+            severity = "warning"
+        try:
+            app.notify(msg, severity=severity, timeout=3)
+        except Exception:
+            pass
 
     def _append_user(self, text: str) -> None:
         scroll = self.query_one("#chat-scroll", VerticalScroll)

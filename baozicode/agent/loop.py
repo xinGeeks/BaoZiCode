@@ -103,7 +103,10 @@ def _read_memory_indices(
 # - "time_gap":ttl="once",resume 时根据首条 user 时间间隔决定插不插
 # - "memory_refreshed":ttl="sticky",MemoryUpdater 成功更新后注入
 # v1.1 新增 "hook_prompt" — Hook prompt action 通过 enqueue_reminder 注入
-ReminderKind = Literal["time_gap", "memory_refreshed", "hook_prompt"]
+# v1.2 新增 "subagent_result" — SubAgentManager 异步结果回流
+ReminderKind = Literal[
+    "time_gap", "memory_refreshed", "hook_prompt", "subagent_result"
+]
 
 
 class Agent:
@@ -147,6 +150,8 @@ class Agent:
         skill_activation: "Any | None" = None,
         skill_registry: "Any | None" = None,
         hook_dispatcher: "Any | None" = None,
+        subagent_manager: "Any | None" = None,
+        subagent_meta: "Any | None" = None,
     ) -> None:
         if config is None:
             raise ValueError("Agent requires AppConfig in v0.4+")
@@ -193,6 +198,14 @@ class Agent:
         self._hook_stable_overrides: list[str] = []  # loaded on session.start
         # v1.1.1: temp slot 的 hook prompt — 一次性,下轮 _inject_reminders 消费即清
         self._temp_reminders: list[str] = []
+        # v1.2: SubAgentManager(主 Agent 注入,供 task 工具 dispatch;
+        # sub-Agent 自己为 None)
+        self._subagent_manager: Any = subagent_manager
+        # v1.2: subagent_meta(主 Agent = None;sub-Agent = {task_id, role, type, depth})
+        self._subagent_meta: Any = subagent_meta
+        # v1.2: 主 Agent run 期间的 in-flight 标志(SubAgentManager 用它判断
+        # 结果走 idle=user message 还是 busy=reminder)
+        self._is_running: bool = False
         # v0.8: 两层 memory index — bootstrap 后立即读出 index 文本,灌进
         # PromptBuilder 让 LLM 在每轮请求前就知道已有笔记,避免重复 add。
         memory_index_user, memory_index_project = _read_memory_indices(
@@ -354,6 +367,26 @@ class Agent:
                     )
                 )
 
+        # v1.2: sub-Agent 结果通知(busy 路径) — drain 之后 enqueue 为 reminder,
+        # ttl=once,本轮消费后清掉。
+        if self._subagent_manager is not None:
+            try:
+                pending_tasks = self._subagent_manager.drain_pending_notifications()
+                for task in pending_tasks:
+                    reminders.append(
+                        Message(
+                            role="user",
+                            content=(
+                                f'<system-reminder type="subagent_result"'
+                                f' ttl="once">\n'
+                                f"{self._subagent_manager._format_reminder(task)}\n"
+                                "</system-reminder>"
+                            ),
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("subagent notification drain 失败: %s", exc)
+
         # 4) v0.8: 外部入队的 reminder(time_gap / memory_refreshed)— ttl=once 的
         # 注入后从队列里丢弃,sticky 的保留(下一轮还会重发)。
         if self._pending_reminders:
@@ -413,6 +446,8 @@ class Agent:
         - message.sent 在 conversation.add_turn 之后 fire
         """
         self._cancel_event.clear()
+        # v1.2: 标记 in-flight(SubAgentManager 据此走 busy=reminder)
+        self._is_running = True
         # v1.1:message.received(在 add_user 之前)
         self._fire_lifecycle_safe("message.received", user_message)
         self._conversation.add_user(user_message)
@@ -599,6 +634,17 @@ class Agent:
                 terminate_reason = StopReason.STREAM_ERROR
             yield AgentEvent.error(f"unhandled: {exc}")
         finally:
+            # v1.2: cascade cancel — 主 Agent cancel 时通知所有 sub-Agent
+            if (
+                self._cancel_event.is_set()
+                and self._subagent_manager is not None
+                and self._subagent_meta is None
+            ):
+                # 只有主 Agent 才级联;sub-Agent 自己 cancel 不级联
+                try:
+                    self._subagent_manager.cancel_all()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("subagent cancel_all 失败: %s", exc)
             # v1.1:system.cancel(若用户取消)— v1.2 改 payload 为 spec'd dict
             if self._cancel_event.is_set():
                 self._fire_lifecycle_safe("system.cancel", {
@@ -607,6 +653,8 @@ class Agent:
                 })
             # v1.1:session.end(无论什么 stop 路径都 fire,system.error 之后也必跑)
             self._fire_lifecycle_safe("session.end", None)
+            # v1.2: 清 in-flight 标志(SubAgentManager 之后看到 idle 路径)
+            self._is_running = False
             if terminate_reason is None:
                 # 跑完循环但没有显式 reason → 兜底 MAX_ITERATIONS_REACHED
                 terminate_reason = StopReason.MAX_ITERATIONS_REACHED
@@ -769,9 +817,17 @@ class Agent:
             return HookResult()
 
     def _fire_lifecycle_safe(self, event: str, payload: Any) -> None:
-        """统一 lifecycle 事件触发(fail-open:异常仅 log)。"""
+        """统一 lifecycle 事件触发(fail-open:异常仅 log)。
+
+        v1.2:sub-Agent 触发的事件 — 当 payload 是 dict 时,在副本里加 `subagent` 字段
+        (subagent_meta 的 4 字段字典);主 Agent 触发时 payload 不变。
+        """
         if self._hook_dispatcher is None:
             return
+        # v1.2:sub-Agent 注入 `subagent` 字段 — 仅当 payload 是 dict 时加
+        # (ToolCall / ToolResult 等 dataclass 不动,避免破坏老 hook)
+        if self._subagent_meta is not None and isinstance(payload, dict):
+            payload = {**payload, "subagent": self._subagent_meta}
         try:
             self._hook_dispatcher.run(event, payload)
         except Exception as exc:

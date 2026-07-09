@@ -24,6 +24,7 @@ __all__ = [
     "RulesConfig",
     "SessionConfig",
     "SkillsConfig",
+    "SubAgentsConfig",
 ]
 
 
@@ -220,6 +221,46 @@ class SkillsConfig(BaseModel):
     )
 
 
+class SubAgentsConfig(BaseModel):
+    """v1.2 SubAgent Delegation — sub-Agent 系统配置。
+
+    全部字段可选:整块省略 → 全默认(系统全开)。
+    - `enabled` 关闭 → 整套系统停用(TASK_TOOL 仍可注册但 dispatch 返错)
+    - `max_concurrent` 同时 running 上限,默认 5
+    - `default_timeout_seconds` sync 模式默认超时
+    - `background_whitelist` 后台模式白名单(默认 5 个只读工具)
+    - 三个 dir 字段覆盖默认三级目录;None 时走 `baozicode/agents/_defaults`
+    - `plugins_enabled` 关掉 MCP plugin 拉取
+    - `task_retention_minutes` terminal 状态保留时间
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="SubAgent 系统总开关")
+    max_concurrent: int = Field(default=5, ge=1, le=20)
+    default_timeout_seconds: int = Field(default=300, ge=10, le=3600)
+    background_whitelist: list[str] = Field(
+        default_factory=lambda: [
+            "Read", "Grep", "Glob", "WebFetch", "notify_complete",
+        ],
+        description="后台模式可见工具白名单(L4)",
+    )
+    builtin_dir: Path | None = Field(
+        default=None,
+        description="覆盖包内 builtin Agent 目录;None 走 baozicode/agents/builtin",
+    )
+    user_dir: Path | None = Field(
+        default=None,
+        description="覆盖 user 级 Agent 目录;None 走 ~/.config/baozicode/agents",
+    )
+    project_dir: Path | None = Field(
+        default=None,
+        description="覆盖 project 级 Agent 目录;None 走 <root>/.baozicode/agents",
+    )
+    plugins_enabled: bool = Field(default=True)
+    task_retention_minutes: int = Field(default=5, ge=1, le=60)
+
+
 class AgentConfig(BaseModel):
     """v0.3 引入 — Agent 主循环参数 + v0.4 规则与提醒节奏。
 
@@ -368,6 +409,9 @@ class AppConfig(BaseModel):
         default=None,
         description="v1.1 hook 规则列表;None 走 v1.0 行为。详细 schema 看 baozicode.hooks.schema。",
     )
+    # v1.2:SubAgent 系统配置(可选;None 时整层 SubAgent 系统关闭,
+    # App 不构造 SubAgentManager,TASK_TOOL 不注册)
+    subagents: "SubAgentsConfig | None" = None
 
     def active(self) -> BackendConfig:
         """返回当前激活后端的配置。"""

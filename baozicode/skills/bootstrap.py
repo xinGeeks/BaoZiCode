@@ -122,7 +122,7 @@ def bootstrap_skills(
         empty_registry = SkillRegistry()
         empty_activation = SkillActivation(CommandRegistry())
         empty_loader = SkillLoader(empty_registry, empty_activation)
-        empty_executor = SkillExecutor(empty_loader, empty_activation, independent_runner=None)
+        empty_executor = SkillExecutor(empty_loader, empty_activation, subagent_manager=None)
         return SkillSet(
             registry=empty_registry,
             activation=empty_activation,
@@ -164,7 +164,7 @@ def bootstrap_skills(
         activation,
         tool_registry=tool_registry,
     )
-    executor = SkillExecutor(loader, activation, independent_runner=None)
+    executor = SkillExecutor(loader, activation, subagent_manager=None)
 
     return SkillSet(
         registry=registry,
