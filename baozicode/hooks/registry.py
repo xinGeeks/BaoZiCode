@@ -146,10 +146,18 @@ class HookRegistry:
     def all_hooks(self) -> list[HookDefYaml]:
         return list(self._hooks)
 
-    def create_dispatcher(self, agent: Any) -> "HookDispatcher":
-        """构造 HookDispatcher 实例,持有 agent 反向引用(只用于 enqueue_reminder)。"""
+    def create_dispatcher(
+        self,
+        agent: Any,
+        *,
+        audit_log: Any = None,
+    ) -> "HookDispatcher":
+        """构造 HookDispatcher 实例,持有 agent 反向引用(只用于 enqueue_reminder)。
+
+        v1.1.1:`audit_log` 可选,HookAuditLog 实例,None 时不落审计。
+        """
         from baozicode.hooks.dispatcher import HookDispatcher
-        return HookDispatcher(registry=self, agent=agent)
+        return HookDispatcher(registry=self, agent=agent, audit_log=audit_log)
 
 
 __all__ = ["HookRegistry", "HookValidationError"]

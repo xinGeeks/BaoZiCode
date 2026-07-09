@@ -21,6 +21,8 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
+log = logging.getLogger(__name__)
+
 from collections.abc import Awaitable, Callable
 
 from baozicode.agent.collector import StreamCollector
@@ -570,11 +572,20 @@ class Agent:
 
                 # v0.5:deny 不再终止 Agent Loop,只通过 reminder 提示 LLM
                 # 老的 check_deny_threshold() 已 no-op,这里不再 break
+        except Exception as exc:  # noqa: BLE001
+            # v1.1:system.error 兜底网底 —— 上述循环内多处 try/except 各自处理
+            # 已知错误(LLM stream / compaction),但任何漏网的未处理异常都走这。
+            # 失败策略与 hook 自身一致:仅 log + fire system.error,绝不阻断 finally。
+            log.exception("Agent.run 未处理异常: %s", exc)
+            self._fire_lifecycle_safe("system.error", exc)
+            if terminate_reason is None:
+                terminate_reason = StopReason.STREAM_ERROR
+            yield AgentEvent.error(f"unhandled: {exc}")
         finally:
             # v1.1:system.cancel(若用户取消)
             if self._cancel_event.is_set():
                 self._fire_lifecycle_safe("system.cancel", "user_interrupt")
-            # v1.1:session.end(无论什么 stop 路径都 fire)
+            # v1.1:session.end(无论什么 stop 路径都 fire,system.error 之后也必跑)
             self._fire_lifecycle_safe("session.end", None)
             if terminate_reason is None:
                 # 跑完循环但没有显式 reason → 兜底 MAX_ITERATIONS_REACHED

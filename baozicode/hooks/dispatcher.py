@@ -52,9 +52,19 @@ class HookResult:
 class HookDispatcher:
     """持有 registry + agent 反向引用;对外暴露 run() 一个方法。"""
 
-    def __init__(self, registry: "HookRegistry", agent: Any) -> None:
+    def __init__(
+        self,
+        registry: "HookRegistry",
+        agent: Any,
+        *,
+        audit_log: Any = None,
+    ) -> None:
         self._registry = registry
         self._agent = agent
+        # v1.1.1:audit_log(可选)—— HookAuditLog 实例,HookInvocation 落 JSONL
+        self._audit_log = audit_log
+        # v1.1.1:run_once 去重 —— 整个 Agent.run 生命周期内只跑一次
+        self._fired_once: set[str] = set()
 
     def agent(self) -> Any:
         return self._agent
@@ -66,10 +76,16 @@ class HookDispatcher:
             return HookResult()
 
         for hook in hooks:
+            # v1.1.1:run_once 全 session 只跑一次 —— 已跑过就跳过
+            if hook.run_once and hook.id in self._fired_once:
+                continue
+
             # async post 后台跑(其他 event 不支持 async,freeze 已挡)
             if hook.async_:
                 if event == "tool.post":
                     asyncio.create_task(self._run_hook_async(hook, event, payload))
+                    if hook.run_once:
+                        self._fired_once.add(hook.id)
                     continue
                 log.error(
                     "hook %s async=true 在 %s 事件上不被允许,跳过",
@@ -78,15 +94,26 @@ class HookDispatcher:
                 continue
 
             result = self._run_hook_sync(hook, event, payload)
+            if hook.run_once:
+                self._fired_once.add(hook.id)
             if result.denied:
                 return result
 
         return HookResult()
 
     def _run_hook_sync(self, hook: HookDefYaml, event: str, payload: Any) -> HookResult:
-        """同步跑一条 hook:condition + 串行 actions。"""
+        """同步跑一条 hook:condition + 串行 actions。
+
+        v1.1.1:成功执行或 deny 都会写一条 HookInvocation 审计(若 audit_log 注入)。
+        """
         # 条件不命中 → 跳过整条
         from baozicode.hooks.condition import evaluate_condition
+        import time as _time
+
+        t0 = _time.monotonic()
+        denied = False
+        denial_reason: str | None = None
+        error_msg: str | None = None
         try:
             if not evaluate_condition(hook.if_, payload):
                 return HookResult()
@@ -114,18 +141,72 @@ class HookDispatcher:
                     "hook %s action %s 抛异常,继续: %s",
                     hook.id, type(action).__name__, exc,
                 )
+                error_msg = str(exc)
                 continue
 
             if result.error:
                 log.warning("hook %s action 报错: %s", hook.id, result.error)
+                error_msg = result.error
             if result.deny:
+                denied = True
+                denial_reason = result.reason
+                self._record_audit(
+                    event=event, hook=hook, payload=payload,
+                    deny=True, reason=result.reason,
+                    duration_ms=int((_time.monotonic() - t0) * 1000),
+                )
                 return HookResult(
                     denied=True,
                     denied_hook_id=hook.id,
                     reason=result.reason,
                 )
 
+        self._record_audit(
+            event=event, hook=hook, payload=payload,
+            deny=False, reason=None,
+            duration_ms=int((_time.monotonic() - t0) * 1000),
+            error=error_msg,
+        )
         return HookResult()
+
+    def _record_audit(
+        self,
+        *,
+        event: str,
+        hook: HookDefYaml,
+        payload: Any,
+        deny: bool,
+        reason: str | None,
+        duration_ms: int,
+        error: str | None = None,
+    ) -> None:
+        """写一条 HookInvocation 到 audit_log(注入则跳过)。
+
+        全程 try/except —— audit 写失败不阻断 hook 主流程(fail-open)。
+        """
+        if self._audit_log is None:
+            return
+        try:
+            from baozicode.hooks.audit import HookInvocation
+            tool_name = ""
+            tool_call_id = ""
+            if payload is not None:
+                tool_name = getattr(payload, "name", "") or ""
+                tool_call_id = getattr(payload, "id", "") or ""
+            inv = HookInvocation(
+                event=event,
+                hook_id=hook.id,
+                action_kind=hook.actions[0].action if hook.actions else "",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                deny=deny,
+                reason=reason,
+                duration_ms=duration_ms,
+                error=error,
+            )
+            self._audit_log.record_invocation_sync(inv)
+        except Exception as exc:
+            log.warning("hook audit 记录失败: %s", exc)
 
     async def _run_hook_async(
         self, hook: HookDefYaml, event: str, payload: Any

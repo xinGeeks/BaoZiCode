@@ -80,29 +80,8 @@ class BaoZiCodeApp(App):
         # 已在跑的 Agent 不受影响(其 __init__ 时刻已捕获 mode)
         self.session_mode: PermissionMode | None = None
 
-        # ---- v1.1:Hooks lifecycle 加载 ----
-        # 在 permissions 之后立即跑,传给 Agent 让它在 v1.1 pipeline 用。
-        # 任何 HookValidationError → SystemExit(在 load_hooks 调用处接住)。
-        self.hook_dispatcher: Any = None
-        try:
-            from baozicode.hooks import load_hooks as hooks_load, HookValidationError
-            self.hook_dispatcher = hooks_load(config, agent=None)
-        except HookValidationError as exc:
-            print(f"ERROR: hooks validation failed:\n{exc}", file=__import__("sys").stderr)
-            raise SystemExit(1)
-
-        # ---- v0.8:三层 BaoZiCode.md 加载 ----
-        # 启动时扫三层(全无 → 打印 stderr banner),concat + @include 解析后
-        # 存到 self.instructions;Agent 构造时取 self.instructions.concatenated。
-        self.instructions: LoadedInstructions = instructions_bootstrap(
-            self.project_root, config
-        )
-
-        # ---- v0.6:MCP 客户端 ----
-        # 如果 caller(CLI)已 bootstrap,直接接过来;否则由 on_mount worker 异步 bootstrap
-        self.mcp_manager: McpClientManager | None = mcp_manager
-
         # ---- v0.7 → v0.8:session_id 从 uuid4 hex 改成 YYYYMMDD-HHMMSS-xxxx ----
+        # 提前到 hooks 之前:hook audit log 路径含 session_id,必须先分配。
         # 启动时先把 `.baozicode/context/` 下所有 v0.7 uuid 目录迁到新格式,
         # 再为当前 session 分配新 ID — 避免新 ID 撞到刚迁好的目录名。
         context_root = self.project_root / ".baozicode" / "context"
@@ -119,6 +98,37 @@ class BaoZiCodeApp(App):
             config=self._build_context_config(trigger="auto"),
             telemetry=self.compaction_telemetry,
         )
+
+        # ---- v1.1:Hooks lifecycle 加载 ----
+        # 在 permissions 之后立即跑,传给 Agent 让它在 v1.1 pipeline 用。
+        # 任何 HookValidationError → SystemExit(在 load_hooks 调用处接住)。
+        # audit_log_path 给定时构造 HookAuditLog:JSONL 写到
+        # `<project>/.baozicode/hooks/<session>.audit.jsonl`,100MB 启动期 rotate。
+        self.hook_dispatcher: Any = None
+        try:
+            from baozicode.hooks import load_hooks as hooks_load, HookValidationError
+            audit_log_path = (
+                self.project_root
+                / ".baozicode" / "hooks"
+                / f"{self._session_id}.audit.jsonl"
+            )
+            self.hook_dispatcher = hooks_load(
+                config, agent=None, audit_log_path=audit_log_path
+            )
+        except HookValidationError as exc:
+            print(f"ERROR: hooks validation failed:\n{exc}", file=__import__("sys").stderr)
+            raise SystemExit(1)
+
+        # ---- v0.8:三层 BaoZiCode.md 加载 ----
+        # 启动时扫三层(全无 → 打印 stderr banner),concat + @include 解析后
+        # 存到 self.instructions;Agent 构造时取 self.instructions.concatenated。
+        self.instructions: LoadedInstructions = instructions_bootstrap(
+            self.project_root, config
+        )
+
+        # ---- v0.6:MCP 客户端 ----
+        # 如果 caller(CLI)已 bootstrap,直接接过来;否则由 on_mount worker 异步 bootstrap
+        self.mcp_manager: McpClientManager | None = mcp_manager
 
         # ---- v0.8:SessionArchiver + sessions 列表 ----
         # sessions.bootstrap 跑过期清理、构造当前 session 的 archiver、列已有 sessions

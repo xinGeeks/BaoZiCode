@@ -317,3 +317,200 @@ def test_agent_reminder_kind_includes_hook_prompt():
 
     # ReminderKind literal 现在包含 hook_prompt
     assert "hook_prompt" in ReminderKind.__args__
+
+
+# ---------- v1.1.1:run_once 运行时强制 ----------
+
+def test_dispatcher_run_once_fires_then_skips():
+    """run_once=True 的 hook 全 session 只跑一次 —— 第二次 run() 跳过整条。"""
+    raw = [{
+        "id": "session-bootstrap",
+        "event": "turn.start",
+        "run_once": True,
+        "actions": [{"action": "shell", "command": "exit 1", "timeout_seconds": 5}],
+    }]
+    r = HookRegistry.load(raw)
+    r.freeze()
+    d = r.create_dispatcher(agent=None)
+    # 第一次:触发(应当 deny 因为 exit 1)
+    res1 = d.run("turn.start", None)
+    assert res1.denied is True
+    assert res1.denied_hook_id == "session-bootstrap"
+    # 第二次:run_once 已 fire,跳过整条 → 不 deny
+    res2 = d.run("turn.start", None)
+    assert res2.denied is False
+
+
+def test_dispatcher_run_once_false_fires_every_time():
+    """run_once 默认 False → 每次 run() 都跑。"""
+    raw = [{
+        "id": "always-fire",
+        "event": "turn.start",
+        "actions": [{"action": "shell", "command": "exit 1", "timeout_seconds": 5}],
+    }]
+    r = HookRegistry.load(raw)
+    r.freeze()
+    d = r.create_dispatcher(agent=None)
+    for _ in range(3):
+        res = d.run("turn.start", None)
+        assert res.denied is True
+        assert res.denied_hook_id == "always-fire"
+
+
+# ---------- v1.1.1:HookAuditLog 接线 ----------
+
+def test_dispatcher_audit_log_writes_invocation(tmp_path):
+    """dispatcher 跑完一条 hook,audit_log 应当落一条 HookInvocation JSONL。"""
+    from baozicode.hooks.audit import HookAuditLog, HookInvocation
+
+    log_path = tmp_path / "hooks.audit.jsonl"
+    audit_log = HookAuditLog(log_path)
+    raw = [{
+        "id": "audit-bash",
+        "event": "tool.pre",
+        "if": {"all": [{"tool": "Bash"}]},
+        "actions": [{"action": "shell", "command": "exit 0", "timeout_seconds": 5}],
+    }]
+    r = HookRegistry.load(raw)
+    r.freeze()
+    d = r.create_dispatcher(agent=None, audit_log=audit_log)
+    call = MagicMock()
+    call.name = "Bash"
+    call.id = "call-1"
+    call.arguments = {"command": "ls"}
+    d.run("tool.pre", call)
+    # 同步路径已写 → 应当有一行
+    assert log_path.exists()
+    content = log_path.read_text(encoding="utf-8").strip()
+    assert content, "audit log 应至少有一行"
+    # 解析 JSON 验证字段
+    import json as _json
+    line = _json.loads(content)
+    assert line["hook_id"] == "audit-bash"
+    assert line["event"] == "tool.pre"
+    assert line["tool_name"] == "Bash"
+    assert line["tool_call_id"] == "call-1"
+    assert line["deny"] is False
+    assert "duration_ms" in line
+
+
+def test_dispatcher_audit_log_records_deny(tmp_path):
+    """hook 拒 → audit 记录 deny=True + reason。"""
+    from baozicode.hooks.audit import HookAuditLog
+
+    log_path = tmp_path / "hooks.audit.jsonl"
+    audit_log = HookAuditLog(log_path)
+    raw = [{
+        "id": "deny-bad",
+        "event": "tool.pre",
+        "actions": [{"action": "shell", "command": "echo blocked; exit 1", "timeout_seconds": 5}],
+    }]
+    r = HookRegistry.load(raw)
+    r.freeze()
+    d = r.create_dispatcher(agent=None, audit_log=audit_log)
+    call = MagicMock()
+    call.name = "Bash"
+    call.id = "call-2"
+    call.arguments = {}
+    res = d.run("tool.pre", call)
+    assert res.denied is True
+    import json as _json
+    line = _json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert line["deny"] is True
+    assert line["reason"] == "blocked"
+    assert line["hook_id"] == "deny-bad"
+
+
+# ---------- v1.1.1:system.error 兜底 fire ----------
+
+def test_agent_run_fires_system_error_on_outer_exception():
+    """Agent.run 主循环内未处理异常时,system.error 事件 + AgentEvent.error 应触发。"""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+
+    from baozicode.agent.events import AgentEvent, StopReason
+    from baozicode.agent.loop import Agent
+    from baozicode.conversation.manager import ConversationManager
+    from baozicode.llm.base import ContentDelta, LLMClient
+    from baozicode.tools.registry import get_all_tools
+    from _agent_helpers import make_minimal_config
+
+    # 收集 lifecycle 事件的 mini dispatcher(不真跑 hook)
+    fired: list[tuple[str, Any]] = []
+
+    class _MiniDispatcher:
+        def run(self, event: str, payload: Any):
+            fired.append((event, payload))
+            return None  # 真实 dispatcher 返回 HookResult
+
+    # LLM 第一次正常返回(一段 text),第二轮才抛 — 这样能进 while 循环,
+    # 在第二轮的 LLM stream 抛异常。但内层 try/except (line 463-482) 会接住
+    # 转成 STREAM_ERROR,不走外层 except。
+    # 真正测试外层 except:patch turn.start 的 fire 让其抛 RuntimeError,
+    # 这样 raise 在外层 try 块内(turn.start 调用点在 while 顶部),
+    # 且不被任何内层 try/except 包 → 走外层 except → fire system.error。
+    class _TextOnlyLLM(LLMClient):
+        def __init__(self):
+            self.call_count = 0
+
+        async def stream(self, messages, system, tools, *, cache_breakpoints=None):
+            self.call_count += 1
+            yield ContentDelta(type="text", text="ok")
+            yield ContentDelta(type="usage", text=ContentDelta.make_usage(1, 1))
+
+    config = make_minimal_config()
+    agent = Agent(
+        llm_client=_TextOnlyLLM(),
+        tools=get_all_tools(),
+        conversation=ConversationManager(),
+        permissions=None,
+        config=config,
+        hook_dispatcher=_MiniDispatcher(),  # type: ignore[arg-type]
+    )
+
+    # patch _fire_lifecycle_safe:turn.start 时抛,其他事件原样
+    original_fire = agent._fire_lifecycle_safe
+
+    def _boom_fire(event: str, payload: Any) -> None:
+        if event == "turn.start":
+            raise RuntimeError("simulated hook runtime error")
+        original_fire(event, payload)
+
+    agent._fire_lifecycle_safe = _boom_fire  # type: ignore[method-assign]
+
+    # 跑 Agent.run,收集事件
+    events: list[AgentEvent] = []
+
+    async def _collect():
+        async for ev in agent.run("hi"):
+            events.append(ev)
+
+    asyncio.run(_collect())
+
+    # system.error 应被 fire(payload 是 RuntimeError)
+    assert any(e == "system.error" for e, _ in fired), (
+        f"system.error 未触发,实际 fire: {[e for e, _ in fired]}"
+    )
+    # session.end 仍 fire(finally 块保证)
+    assert any(e == "session.end" for e, _ in fired)
+    # AgentEvent.error 应 yield
+    error_events = [e for e in events if e.type == "error"]
+    assert error_events, "应有 error 事件 yield"
+    # done 事件,terminate_reason=STREAM_ERROR(复用 "something failed" 语义)
+    done_events = [e for e in events if e.type == "done"]
+    assert done_events and done_events[0].payload == StopReason.STREAM_ERROR
+
+
+# ---------- v1.1:条件 matchers 边界(not_exact)----------
+
+def test_matchers_not_exact():
+    """not_exact 是反向精确匹配 —— v1.0 权限规则已有,v1.1 条件语法复用。"""
+    assert matchers["not_exact"]("foo", "foo") is False
+    assert matchers["not_exact"]("foo", "bar") is True
+    # 在 condition 表达式里使用
+    cond = ConditionYaml.model_validate({
+        "all": [{"arg": {"path": {"kind": "not_exact", "value": "/etc"}}}],
+    })
+    assert evaluate_condition(cond, _FakeCall("Read", {"path": "/tmp"})) is True
+    assert evaluate_condition(cond, _FakeCall("Read", {"path": "/etc"})) is False
