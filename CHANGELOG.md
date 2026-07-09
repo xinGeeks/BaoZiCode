@@ -44,6 +44,9 @@ BaoZiCode 所有重要变更记录在此。版本号遵循 [Semantic Versioning]
 
 - `openspec/changes/archive/2026-07-09-v1-1-hooks-lifecycle/`(proposal +
   design + tasks + 4 个 delta spec + 1 个新 capability spec)
+- 迁移指南:`docs/migrations/v1.0-to-v1.1.md`(8 节 + 10 个 FAQ:
+  Hook YAML schema / 11 个事件 / 4 种 action 字段表 / ToolResult 派生关系 /
+  流水线形态 / 配置块 / 最少动作升级 / 常见 FAQ)
 
 ## [v1.0] — 2026-07
 

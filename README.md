@@ -63,6 +63,8 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   - **审计**:`HookAuditLog` 异步 JSONL append + 100 MB 启动期轮转,
     默认 `<project>/.baozicode/hooks/<session>.audit.jsonl`
   - 没有 `hooks:` 块的 v1.0 项目,Agent 走 legacy 路径(v1.0 byte-identical)
+  - 详细迁移 + 字段表 + 11 个事件清单 + 4 种 action 详解 + 10 个 FAQ 见
+    `docs/migrations/v1.0-to-v1.1.md`
 
 - ✅ **Skill 系统(v1.0 新增)** — `baozicode/skills/`
   - 把可复用 AI 操作封装成独立 Markdown 文件 + YAML frontmatter,3 个内置
