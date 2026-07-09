@@ -14,7 +14,7 @@ http:
 
 sub-agent:
 - v1.1 占位:parse_expr 评估,res 里有 output 字段占位
-- 实际子 Agent 执行留 v1.2
+- 实际子 Agent 执行留 v1.1.1(同 migration 文档 §4.5)
 
 prompt:
 - slot=sticky_reminder(默认)→ agent.enqueue_reminder(kind="hook_prompt", body, ttl)
@@ -148,9 +148,10 @@ async def execute_http(action: _HttpAction, ctx: "HookContext") -> ActionResult:
 
     return _eval_parse_expr(
         action.parse_expr,
-        res_obj=SimpleNamespace(status=status, body=body),
+        res_obj=SimpleNamespace(),
         deny_reason_default=action.deny_reason,
         hook_id=ctx.hook_id,
+        extra_names={"body": body, "status": status, "headers": {}},
     )
 
 
@@ -160,7 +161,7 @@ async def execute_http(action: _HttpAction, ctx: "HookContext") -> ActionResult:
 async def execute_subagent(action: _SubAgentAction, ctx: "HookContext") -> ActionResult:
     """v1.1 占位:parse_expr 评估,res 里有 output 字段占位。
 
-    实际子 Agent 启动(开子 ConversationManager + Agent)留 v1.2。
+    实际子 Agent 启动(开子 ConversationManager + Agent)留 v1.1.1。
     """
     if not action.parse_expr:
         log.info(
@@ -173,13 +174,14 @@ async def execute_subagent(action: _SubAgentAction, ctx: "HookContext") -> Actio
     placeholder_output = {"goal": action.goal, "status": "v1.1-not-implemented"}
     return _eval_parse_expr(
         action.parse_expr,
-        res_obj=SimpleNamespace(
-            status="placeholder",
-            output=placeholder_output,
-            body=placeholder_output,
-        ),
+        res_obj=SimpleNamespace(),
         deny_reason_default=action.deny_reason,
         hook_id=ctx.hook_id,
+        extra_names={
+            "output": placeholder_output,
+            "status": "placeholder",
+            "body": placeholder_output,
+        },
     )
 
 
@@ -259,16 +261,81 @@ def _eval_parse_expr(
     res_obj: Any,
     deny_reason_default: str | None,
     hook_id: str,
+    extra_names: dict[str, Any] | None = None,
 ) -> ActionResult:
-    """用 simpleeval 评估 parse_expr,允许赋 res.deny / res.deny_reason。"""
+    """用 simpleeval 评估 parse_expr,允许赋 res.deny / res.deny_reason。
+
+    v1.1.1 修复:simpleeval 默认 `EvalWithCompoundTypes._eval_assign` 只 warn
+    不实际赋值,导致 `res.deny = True` 被静默忽略(spec 承诺的 deny 触发
+    从未真正生效)。用 `_AssigningEval` 子类覆盖 _eval_assign,只允许:
+    - 根是 names 字典里的标识符(此处是 `res` + extra_names 里的键)
+    - 链式属性赋值:`res.deny = ...` / `res.deny_reason = ...`
+    其他形式(ast.Subscript、函数调用、import 等)仍走 SimpleEval 默认拒绝。
+
+    extra_names:额外可读标识符(http 注入 `body`/`status`/`headers`;
+    sub-agent 注入 `output` 等)。spec 文档承诺 `body`/`status` 是顶层
+    可读 —— v1.1.0 漏注入,本函数加回来。
+    """
     try:
-        from simpleeval import EvalWithCompoundTypes, NameNotDefined
+        from simpleeval import EvalWithCompoundTypes
+        import ast as _ast
     except ImportError:
         raise HookParseError(
             "simpleeval 未安装;pip install simpleeval 后再启用 http/sub-agent 的 parse_expr"
         )
 
-    evaluator = EvalWithCompoundTypes(names={"res": res_obj})
+    class _AssigningEval(EvalWithCompoundTypes):
+        """只允许对 names 根的属性赋值,其他 AST 节点仍拒绝。
+
+        v1.1.1 增量:支持多语句(parse_expr 写成多行更可读;spec 文档示例就有
+        `res.deny = ...; res.deny_reason = ...` 两行)。simpleeval 默认
+        `eval()` 用 mode='eval' 只支持单表达式,这里 override 用 mode='exec' 逐句跑。
+        """
+
+        def _eval_assign(self, node):  # type: ignore[override]
+            # 多 target / 非单赋值 → 默认拒绝
+            if len(node.targets) != 1:
+                return super()._eval_assign(node)
+            target = node.targets[0]
+            # 必须是 Attribute 链(支持 res.deny / res.deny.reason 这种)
+            if not isinstance(target, _ast.Attribute):
+                return super()._eval_assign(node)
+            # 沿 Attribute 链回溯到根,根必须是 self.names 里的 Name
+            parts: list[str] = []
+            cur = target
+            while isinstance(cur, _ast.Attribute):
+                parts.append(cur.attr)
+                cur = cur.value
+            if not isinstance(cur, _ast.Name) or cur.id not in self.names:
+                return super()._eval_assign(node)
+            # 先求值 rhs(可能产生副作用:warn 但不阻断)
+            value = self._eval(node.value)
+            # 沿链 setattr
+            obj = self.names[cur.id]
+            parts.reverse()  # 最外层 attr 在前
+            for attr in parts[:-1]:
+                obj = getattr(obj, attr)
+            setattr(obj, parts[-1], value)
+            return value
+
+        def eval(self, expr, previously_parsed=None):  # type: ignore[override]
+            """支持多语句:用 mode='exec' 解析 + 逐句 dispatch 到 _eval。"""
+            import warnings as _w
+            try:
+                tree = _ast.parse(expr, mode="exec")
+            except SyntaxError:
+                return super().eval(expr, previously_parsed)
+            last = None
+            for stmt in tree.body:
+                with _w.catch_warnings():
+                    _w.simplefilter("ignore")
+                    last = self._eval(stmt)
+            return last
+
+    names: dict[str, Any] = {"res": res_obj}
+    if extra_names:
+        names.update(extra_names)
+    evaluator = _AssigningEval(names=names)
     try:
         evaluator.eval(expr)
     except Exception as exc:

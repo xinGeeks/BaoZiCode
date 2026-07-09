@@ -211,8 +211,16 @@ class HookDispatcher:
     async def _run_hook_async(
         self, hook: HookDefYaml, event: str, payload: Any
     ) -> None:
-        """async post 后台跑:类似同步,但 enqueue=True 时调 agent.enqueue_reminder。"""
+        """async post 后台跑:类似同步,但 enqueue=True 时调 agent.enqueue_reminder。
+
+        v1.1.1:跑完写一条 HookInvocation 审计(async 路径用 record_invocation 异步版,
+        写失败不阻断)。
+        """
         from baozicode.hooks.condition import evaluate_condition
+        import time as _time
+
+        t0 = _time.monotonic()
+        error_msg: str | None = None
         try:
             if not evaluate_condition(hook.if_, payload):
                 return
@@ -241,6 +249,7 @@ class HookDispatcher:
                             )
                         except Exception as exc:
                             log.warning("hook %s async enqueue 失败: %s", hook.id, exc)
+                            error_msg = str(exc)
                         continue
                     if not action.enqueue:
                         log.info("hook_prompt(async): %s", action.content[:120])
@@ -251,16 +260,61 @@ class HookDispatcher:
                         result = await execute_action(action, ctx)
                         if result.error:
                             log.warning("hook %s async action 报错: %s", hook.id, result.error)
+                            error_msg = result.error
                     except Exception as exc:
                         log.warning("hook %s async action 异常: %s", hook.id, exc)
+                        error_msg = str(exc)
                     continue
 
                 # 默认:后台跑,失败仅 log(不灌 prompt,不阻塞主流程)
                 result = await execute_action(action, ctx)
                 if result.error:
                     log.warning("hook %s async action 报错: %s", hook.id, result.error)
+                    error_msg = result.error
             except Exception as exc:
                 log.warning("hook %s async action 异常: %s", hook.id, exc)
+                error_msg = str(exc)
+
+        # v1.1.1:async 路径也写一条审计 —— record_invocation 是 async,适合 create_task 上下文
+        await self._record_audit_async(
+            event=event, hook=hook, payload=payload,
+            duration_ms=int((_time.monotonic() - t0) * 1000),
+            error=error_msg,
+        )
+
+    async def _record_audit_async(
+        self,
+        *,
+        event: str,
+        hook: HookDefYaml,
+        payload: Any,
+        duration_ms: int,
+        error: str | None = None,
+    ) -> None:
+        """async 路径的审计写入(audit_log=None 时跳过;写失败仅 log)。"""
+        if self._audit_log is None:
+            return
+        try:
+            from baozicode.hooks.audit import HookInvocation
+            tool_name = ""
+            tool_call_id = ""
+            if payload is not None:
+                tool_name = getattr(payload, "name", "") or ""
+                tool_call_id = getattr(payload, "id", "") or ""
+            inv = HookInvocation(
+                event=event,
+                hook_id=hook.id,
+                action_kind=hook.actions[0].action if hook.actions else "",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                deny=False,  # async path 都是 allow-only(deny 走 sync)
+                reason=None,
+                duration_ms=duration_ms,
+                error=error,
+            )
+            await self._audit_log.record_invocation(inv)
+        except Exception as exc:
+            log.warning("hook audit(async) 记录失败: %s", exc)
 
 
 __all__ = ["HookContext", "HookDispatcher", "HookResult"]

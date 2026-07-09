@@ -138,7 +138,7 @@ class _PromptAction(BaseModel):
 
 
 class _SubAgentAction(BaseModel):
-    """sub-agent action:启动子 Agent(v1.1 占位,v1.2 实现实际执行)。"""
+    """sub-agent action:启动子 Agent(v1.1 占位,v1.1.1 实现实际执行)。"""
 
     model_config = ConfigDict(extra="forbid")
 

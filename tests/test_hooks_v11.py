@@ -34,6 +34,7 @@ from baozicode.hooks.schema import (
     MatcherYaml,
     parse_hook_def,
 )
+from baozicode.llm.base import LLMClient
 from baozicode.permissions import blacklist_check, check, check_layers_2_through_5
 from baozicode.tools.base import ToolCall, ToolResult
 
@@ -309,6 +310,214 @@ def test_execute_prompt_sticky_calls_agent():
     assert kwargs.get("kind") == "hook_prompt" or args[0] == "hook_prompt"
 
 
+# ---------- execute_action: http (mocked) ----------
+
+def test_execute_http_deny_via_parse_expr(monkeypatch):
+    """http 200 + parse_expr 设 res.deny=True → 拒,reason 来自 body。"""
+    from baozicode.hooks.schema import _HttpAction
+    import sys
+
+    class _Resp:
+        status = 200
+
+        async def json(self, content_type=None):
+            return {"risk": 0.9, "label": "dangerous"}
+
+        async def text(self):
+            return ""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def get(self, url, **k):
+            return _Resp()
+
+        def post(self, url, **k):
+            return _Resp()
+
+    class _FakeAiohttp:
+        ClientSession = _Session
+
+    # 关键:executor 内 `import aiohttp` 走 sys.modules,需要替换 sys.modules
+    # 同时也设置模块 namespace(raise=False),让 `import aiohttp` 走 module 查找
+    monkeypatch.setitem(sys.modules, "aiohttp", _FakeAiohttp)
+    from baozicode.hooks import executor as exec_mod
+    monkeypatch.setattr(exec_mod, "aiohttp", _FakeAiohttp, raising=False)
+
+    action = _HttpAction.model_validate({
+        "action": "http",
+        "url": "https://example.com/check",
+        "method": "GET",
+        "parse_expr": (
+            "res.deny = body['risk'] > 0.8\n"
+            "res.deny_reason = body['label']"
+        ),
+    })
+    ctx = HookContext(event="tool.pre", hook_id="http-deny", agent=None)
+    result = asyncio.run(execute_action(action, ctx))
+    assert result.deny is True
+    assert result.reason == "dangerous"
+
+
+def test_execute_http_allow_when_parse_expr_keeps_allow(monkeypatch):
+    """http 200 + parse_expr 不设 deny → 放行。"""
+    from baozicode.hooks.schema import _HttpAction
+    import sys
+
+    class _Resp:
+        status = 200
+
+        async def json(self, content_type=None):
+            return {"risk": 0.1, "label": "safe"}
+
+        async def text(self):
+            return ""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def get(self, url, **k):
+            return _Resp()
+
+        def post(self, url, **k):
+            return _Resp()
+
+    class _FakeAiohttp:
+        ClientSession = _Session
+
+    monkeypatch.setitem(sys.modules, "aiohttp", _FakeAiohttp)
+    from baozicode.hooks import executor as exec_mod
+    monkeypatch.setattr(exec_mod, "aiohttp", _FakeAiohttp, raising=False)
+
+    action = _HttpAction.model_validate({
+        "action": "http",
+        "url": "https://example.com/check",
+        "parse_expr": "res.deny = body['risk'] > 0.8",
+    })
+    ctx = HookContext(event="tool.pre", hook_id="http-allow", agent=None)
+    result = asyncio.run(execute_action(action, ctx))
+    assert result.deny is False
+
+
+def test_execute_http_4xx_does_not_auto_deny(monkeypatch):
+    """http 4xx/5xx → 不主动 deny(spec:接口错 ≠ 主动拦),只记 error。"""
+    from baozicode.hooks.schema import _HttpAction
+    import sys
+
+    class _Resp:
+        status = 503
+
+        async def json(self, content_type=None):
+            return {"error": "service unavailable"}
+
+        async def text(self):
+            return "service unavailable"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def get(self, url, **k):
+            return _Resp()
+
+        def post(self, url, **k):
+            return _Resp()
+
+    class _FakeAiohttp:
+        ClientSession = _Session
+
+    monkeypatch.setitem(sys.modules, "aiohttp", _FakeAiohttp)
+    from baozicode.hooks import executor as exec_mod
+    monkeypatch.setattr(exec_mod, "aiohttp", _FakeAiohttp, raising=False)
+
+    action = _HttpAction.model_validate({
+        "action": "http",
+        "url": "https://example.com/check",
+        "parse_expr": "res.deny = status == 200 and body.get('blocked', False)",
+    })
+    ctx = HookContext(event="tool.pre", hook_id="http-503", agent=None)
+    result = asyncio.run(execute_action(action, ctx))
+    assert result.deny is False  # 4xx/5xx 不自动拒
+
+
+def test_execute_http_connection_error_returns_no_deny(monkeypatch):
+    """http 连接异常 → deny=False,error 字段有值(不阻断主流程)。"""
+    from baozicode.hooks.schema import _HttpAction
+    import sys
+
+    class _Session:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def get(self, url, **k):
+            raise ConnectionError("network unreachable")
+
+        def post(self, url, **k):
+            raise ConnectionError("network unreachable")
+
+    class _FakeAiohttp:
+        ClientSession = _Session
+
+    monkeypatch.setitem(sys.modules, "aiohttp", _FakeAiohttp)
+    from baozicode.hooks import executor as exec_mod
+    monkeypatch.setattr(exec_mod, "aiohttp", _FakeAiohttp, raising=False)
+
+    # 无 parse_expr(连接错时根本不走 parse_expr),但为了让 mock 路径到达外层 except,
+    # 不给 parse_expr。
+    action = _HttpAction.model_validate({
+        "action": "http",
+        "url": "https://example.com/check",
+    })
+    ctx = HookContext(event="tool.pre", hook_id="http-conn", agent=None)
+    result = asyncio.run(execute_action(action, ctx))
+    assert result.deny is False
+    assert result.error and "network unreachable" in result.error
+
+
 # ---------- Agent integration ----------
 
 def test_agent_reminder_kind_includes_hook_prompt():
@@ -421,7 +630,149 @@ def test_dispatcher_audit_log_records_deny(tmp_path):
     assert line["hook_id"] == "deny-bad"
 
 
-# ---------- v1.1.1:system.error 兜底 fire ----------
+# ---------- Agent.run 完整 lifecycle E2E ----------
+
+def test_agent_run_lifecycle_events_fire_in_order():
+    """Agent.run 11 个事件按序 fire(text-only 1 轮 + tool-call 1 轮 + 收尾 1 轮)。
+
+    验证:
+    - message.received → session.start → turn.start(1) → ... → turn.end(1) →
+      message.sent(1) → turn.start(2) → session.end
+    - session.start 必在 turn.start 之前
+    - session.end 必在最后(finally 兜底)
+    - turn.end / message.sent 配对出现
+    """
+    from baozicode.agent.events import StopReason, UsageStats
+    from baozicode.agent.loop import Agent
+    from baozicode.conversation.manager import ConversationManager
+    from baozicode.llm.base import ContentDelta
+    from baozicode.tools.registry import get_all_tools
+    from collections.abc import AsyncIterator
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from _agent_helpers import make_minimal_config
+
+    fired: list[tuple[str, Any]] = []
+
+    class _MiniDispatcher:
+        def run(self, event: str, payload: Any):
+            fired.append((event, payload))
+            return None
+
+    # 第 1 轮:text + tool_use(Read)+ usage;第 2 轮:text + usage
+    class _TwoTurnLLM(LLMClient):
+        def __init__(self):
+            self.call_count = 0
+
+        async def stream(
+            self, messages, system, tools, *, cache_breakpoints=None
+        ) -> AsyncIterator[ContentDelta]:
+            self.call_count += 1
+            if self.call_count == 1:
+                yield ContentDelta(type="text", text="let me read")
+                yield ContentDelta(
+                    type="tool_use",
+                    text=ToolCall(
+                        id="t1", name="Read",
+                        arguments={"file_path": "/dev/null"},
+                    ),
+                )
+                yield ContentDelta(type="usage", text=UsageStats(input_tokens=10, output_tokens=5))
+            else:
+                yield ContentDelta(type="text", text="done")
+                yield ContentDelta(type="usage", text=UsageStats(input_tokens=5, output_tokens=3))
+
+    config = make_minimal_config()
+    from baozicode.agent.loop import Agent
+    agent = Agent(
+        llm_client=_TwoTurnLLM(),
+        tools=get_all_tools(),
+        conversation=ConversationManager(),
+        permissions=None,
+        config=config,
+        hook_dispatcher=_MiniDispatcher(),  # type: ignore[arg-type]
+    )
+
+    events: list[AgentEvent] = []
+
+    async def _collect():
+        async for ev in agent.run("hi"):
+            events.append(ev)
+
+    asyncio.run(_collect())
+
+    names = [e for e, _ in fired]
+    # 起点 + session.end 收尾
+    assert names[0] == "message.received"
+    assert names[-1] == "session.end"
+    # session.start 在 turn.start 之前
+    assert names.index("session.start") < names.index("turn.start")
+    # turn.end 出现 ≥ 1 次(第 1 轮配 tool_call 有 turn.end/message.sent)
+    assert "turn.end" in names
+    assert "message.sent" in names
+    # turn.end 在 message.sent 之前(同轮配对顺序)
+    assert names.index("turn.end") < names.index("message.sent")
+    # 收尾是 STREAM_ERROR 之外的成功路径(COMPLETED)
+    done = [e for e in events if e.type == "done"]
+    assert done and done[0].payload == StopReason.COMPLETED
+
+
+def test_agent_run_session_end_fires_even_on_exception():
+    """Agent.run 主循环内未处理异常 → session.end 仍 fire(finally 兜底)。"""
+    from baozicode.agent.events import UsageStats
+    from baozicode.agent.loop import Agent
+    from baozicode.conversation.manager import ConversationManager
+    from baozicode.llm.base import ContentDelta
+    from baozicode.tools.registry import get_all_tools
+    from collections.abc import AsyncIterator
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from _agent_helpers import make_minimal_config
+
+    fired: list[str] = []
+
+    class _MiniDispatcher:
+        def run(self, event: str, payload: Any):
+            fired.append(event)
+            return None
+
+    class _TextLLM(LLMClient):
+        async def stream(
+            self, messages, system, tools, *, cache_breakpoints=None
+        ) -> AsyncIterator[ContentDelta]:
+            yield ContentDelta(type="text", text="ok")
+            yield ContentDelta(type="usage", text=UsageStats(input_tokens=1, output_tokens=1))
+
+    config = make_minimal_config()
+    from baozicode.agent.loop import Agent
+    agent = Agent(
+        llm_client=_TextLLM(),
+        tools=get_all_tools(),
+        conversation=ConversationManager(),
+        permissions=None,
+        config=config,
+        hook_dispatcher=_MiniDispatcher(),  # type: ignore[arg-type]
+    )
+
+    # patch turn.start 抛错
+    original = agent._fire_lifecycle_safe
+
+    def _boom(event: str, payload: Any) -> None:
+        if event == "turn.start":
+            raise RuntimeError("boom")
+        original(event, payload)
+
+    agent._fire_lifecycle_safe = _boom  # type: ignore[method-assign]
+
+    async def _run():
+        async for _ in agent.run("hi"):
+            pass
+
+    asyncio.run(_run())
+    # session.end 必须在最后(finally 块)
+    assert fired[-1] == "session.end"
 
 def test_agent_run_fires_system_error_on_outer_exception():
     """Agent.run 主循环内未处理异常时,system.error 事件 + AgentEvent.error 应触发。"""
