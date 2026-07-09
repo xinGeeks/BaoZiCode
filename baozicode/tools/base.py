@@ -3,15 +3,26 @@
 `ToolDefinition / ToolCall / ToolResult` 三个 dataclass 是后端、工具实现、TUI 共用的内部契约。
 后端 SDK 类型不许泄漏出 `baozicode/llm/`。
 """
-
 from __future__ import annotations
 
 import locale
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
 Risk = Literal["low", "high"]
+ExecutionStatus = Literal[
+    "block_l1",
+    "block_hook_pre",
+    "block_permission",
+    "executed_success",
+    "executed_failed",
+]
+DeniedBy = Literal["l1_blacklist", "hook_pre", "l2_l5_permission"]
+
+
+log = logging.getLogger(__name__)
 
 
 def decode_subprocess_output(data: bytes) -> str:
@@ -98,11 +109,47 @@ class ToolCall:
 
 @dataclass
 class ToolResult:
-    """工具执行结果，喂回给 LLM。"""
+    """工具执行结果,喂回给 LLM。
+
+    v1.1 新增字段:
+    - `execution_status`:v1.1 pipeline(L1→hook.pre→L2-L5→execute→hook.post)各阶段状态。
+      None 表示"v1.0 风格 / 旁路构造",is_error 走调用方显式值;非 None 时 is_error 由
+      `__post_init__` 派生为 `(execution_status != "executed_success")`。
+    - `denied_by`:被哪一层挡的。仅 `execution_status ∈ block_*` 时填;否则 None。
+    - `denied_hook_id`:首个 deny 的 hook id;仅 `execution_status == block_hook_pre` 时填。
+
+    老调用方式(`ToolResult(tool_call_id, content, is_error=True)`)完全兼容。
+    """
 
     tool_call_id: str
     content: str
     is_error: bool = False
+    # v1.1 hook-aware pipeline 字段
+    execution_status: ExecutionStatus | None = None
+    denied_by: DeniedBy | None = None
+    denied_hook_id: str | None = None
+    # v0.7 offload 字段
+    offloaded_to: str | None = None
+    original_size: int = 0
+
+    def __post_init__(self) -> None:
+        # v1.1:execution_status 设置时派生 is_error(覆盖显式传入值)
+        if self.execution_status is not None:
+            self.is_error = self.execution_status != "executed_success"
+            # 防呆:execution_status ∈ block_* 但 denied_by 是 None
+            if self.execution_status.startswith("block_") and self.denied_by is None:
+                log.warning(
+                    "ToolResult 构造异常:execution_status=%s 但 denied_by=None",
+                    self.execution_status,
+                )
+            # 防呆:execution_status == block_hook_pre 但 denied_hook_id 空
+            if (
+                self.execution_status == "block_hook_pre"
+                and not self.denied_hook_id
+            ):
+                log.warning(
+                    "ToolResult 构造异常:block_hook_pre 但 denied_hook_id 空",
+                )
 
     @classmethod
     def error_result(cls, tool_call_id: str, message: str) -> "ToolResult":
@@ -113,4 +160,11 @@ class ToolResult:
         return cls(tool_call_id=tool_call_id, content=content, is_error=False)
 
 
-__all__ = ["Risk", "ToolDefinition", "ToolCall", "ToolResult"]
+__all__ = [
+    "DeniedBy",
+    "ExecutionStatus",
+    "Risk",
+    "ToolDefinition",
+    "ToolCall",
+    "ToolResult",
+]

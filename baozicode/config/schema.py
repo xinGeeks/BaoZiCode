@@ -361,6 +361,13 @@ class AppConfig(BaseModel):
     commands: "CommandsConfig" = Field(default_factory=lambda: CommandsConfig())
     # v1.0:Skill 系统配置(可选;None 时 bootstrap 用全部默认)
     skills: "SkillsConfig | None" = None
+    # v1.1:Hooks 生命周期配置(可选;None 时整层 hook 系统关闭,v1.0 行为)
+    # 每条 hook 由 baozicode.hooks.HookDefYaml 解析(已 re-export from schema)。
+    # 顶层 dict 走 Pydantic 校验,启动期由 HookRegistry.freeze() 集中校验。
+    hooks: list[dict] | None = Field(
+        default=None,
+        description="v1.1 hook 规则列表;None 走 v1.0 行为。详细 schema 看 baozicode.hooks.schema。",
+    )
 
     def active(self) -> BackendConfig:
         """返回当前激活后端的配置。"""

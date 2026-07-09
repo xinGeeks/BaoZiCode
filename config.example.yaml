@@ -338,3 +338,67 @@ deepseek:
 #
 # frontmatter 字段(name / description / mode / allowed-tools / history-bubbles
 # / model)见 docs/migrations/v0.9-to-v1.0.md 完整说明。
+
+# ============================================================================
+# v1.1 Hooks Lifecycle — 自动化规则
+# ============================================================================
+# 想用 Hook 系统配置一次"事件 → 条件 → 动作"链,Agent 在关键时机自动跑。
+# 不写 `hooks:` 块 = 整个系统关闭,行为完全等价于 v1.0。
+#
+# 一条 hook 的形状:
+#   id: 唯一标识(同一 config.yaml 内不重复)
+#   event: 触发时机(session.start / session.end / turn.start / turn.end /
+#          message.received / message.sent / tool.pre / tool.post /
+#          system.error / system.compaction / system.cancel)
+#   if: 可选条件,all 或 any 二选一
+#   actions: 一组动作(顺序执行,任一拒则停)— 4 种 action 类型:
+#     - shell:跑 bash,exit_code ≠ 0 视为 deny;不允许配 deny 字段
+#     - http:发 HTTP,parse_expr 用 simpleeval 决定 deny
+#     - prompt:注入文字到 system prompt,slot 决定位置
+#     - sub-agent:启动子 Agent(v1.1 占位,v1.2 实现真子 Agent)
+#   async: true 仅允许在 tool.post 用;其他 event 配 async 会启动期报错
+#   timeout_seconds: 30(默认);1 ≤ x ≤ 300
+#   run_once: false(默认);true 则该 hook 触发一次后停用
+#
+# 失败策略:hook 抛异常 / 超时 / 配置错 → 只 log.warning,绝不打断 Agent 主流程
+# 硬墙:L1 硬黑名单(rm -rf / / sudo / chmod 777 等)永远先于 hook.pre 跑,
+# hook.allow 不可绕过 L1。
+#
+hooks:
+  - id: audit-bash-pre
+    event: tool.pre
+    if:
+      all:
+        - tool: "Bash"
+    actions:
+      - action: shell
+        command: |
+          echo "$(date -Iseconds) tool.pre Bash $ARG_COMMAND" \
+            >> .baozicode/audit.log
+        timeout_seconds: 5
+    # exit_code == 0 → 放行;非 0 → deny(stdout 第一行作为 reason)
+
+  - id: inject-style
+    event: turn.start
+    # 无条件触发,每轮 turn 开头注入"代码风格"提醒
+    actions:
+      - action: prompt
+        content: |
+          本项目代码风格:PEP 8 + 100 字符行宽 + 类型注解必须
+          仅当轮可见,不持久化
+        slot: temp
+
+  - id: audit-bash-post-async
+    event: tool.post
+    async: true
+    if:
+      all:
+        - tool: "Bash"
+    actions:
+      - action: shell
+        command: |
+          # 后台跑审计写入,不灌入下一轮 LLM 上下文
+          echo "$(date -Iseconds) tool.post Bash $ARG_COMMAND exit=$?" \
+            >> .baozicode/audit.log
+        timeout_seconds: 5
+        enqueue: false  # 默认,后台日志只写文件,不 enqueue_reminder

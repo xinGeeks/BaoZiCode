@@ -89,6 +89,50 @@ def check(
     return PermissionDecision.fallthrough()
 
 
+def check_layers_2_through_5(
+    call: "ToolCall",
+    ctx: MergedPermissions | None = None,
+) -> PermissionDecision:
+    """v1.1 新增:跑 L2-L5,跳过 L1。
+
+    Agent pipeline 在 hook.pre 之后调这个(因为 hook.pre 之前 L1 已经跑过)。
+    L1 hard blacklist 永远先于 hook.pre,所以 v1.1 pipeline 是:
+    L1(独立)→ hook.pre → L2-L5(=本函数)→ execute → hook.post。
+
+    返回的 `PermissionDecision.layer` 不会等于 `"L1_blacklist"`(那个仅由
+    `check()` 完整流水线填)。
+    """
+    # L2-L4: 需要 ctx;L2 需要 path_sandbox_enabled
+    if ctx is None:
+        return PermissionDecision.fallthrough()
+
+    if ctx.path_sandbox_enabled:
+        sandbox = PathSandbox(real_root=ctx.real_root)  # type: ignore[arg-type]
+        decision = sandbox.check(call)
+        if decision.decision != "fallthrough":
+            return decision
+
+    engine = RuleEngine(merged=ctx)
+    decision = engine.check(call)
+    if decision.decision != "fallthrough":
+        return decision
+
+    mode: PermissionMode = ctx.mode
+    decision = apply_mode(PermissionDecision.fallthrough(), mode)
+    if decision.decision != "fallthrough":
+        return decision
+
+    return PermissionDecision.fallthrough()
+
+
+def blacklist_check(call: "ToolCall") -> PermissionDecision:
+    """v1.1 新增:L1-only 入口。
+
+    Agent pipeline 在 hook.pre 之前调这个,把 L1 结果转 ToolResult.execution_status。
+    """
+    return _L1.check(call)
+
+
 def bootstrap(project_root, config: "AppConfig | None" = None) -> MergedPermissions:
     """启动时初始化合并权限状态。
 

@@ -80,6 +80,17 @@ class BaoZiCodeApp(App):
         # 已在跑的 Agent 不受影响(其 __init__ 时刻已捕获 mode)
         self.session_mode: PermissionMode | None = None
 
+        # ---- v1.1:Hooks lifecycle 加载 ----
+        # 在 permissions 之后立即跑,传给 Agent 让它在 v1.1 pipeline 用。
+        # 任何 HookValidationError → SystemExit(在 load_hooks 调用处接住)。
+        self.hook_dispatcher: Any = None
+        try:
+            from baozicode.hooks import load_hooks as hooks_load, HookValidationError
+            self.hook_dispatcher = hooks_load(config, agent=None)
+        except HookValidationError as exc:
+            print(f"ERROR: hooks validation failed:\n{exc}", file=__import__("sys").stderr)
+            raise SystemExit(1)
+
         # ---- v0.8:三层 BaoZiCode.md 加载 ----
         # 启动时扫三层(全无 → 打印 stderr banner),concat + @include 解析后
         # 存到 self.instructions;Agent 构造时取 self.instructions.concatenated。

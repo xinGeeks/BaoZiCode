@@ -100,7 +100,8 @@ def _read_memory_indices(
 # 通过 `enqueue_reminder` 注入。
 # - "time_gap":ttl="once",resume 时根据首条 user 时间间隔决定插不插
 # - "memory_refreshed":ttl="sticky",MemoryUpdater 成功更新后注入
-ReminderKind = Literal["time_gap", "memory_refreshed"]
+# v1.1 新增 "hook_prompt" — Hook prompt action 通过 enqueue_reminder 注入
+ReminderKind = Literal["time_gap", "memory_refreshed", "hook_prompt"]
 
 
 class Agent:
@@ -115,6 +116,12 @@ class Agent:
     - 构造时调一次 PromptBuilder.build() → self._prompt
     - llm.stream 的 system/tools 参数统一从 self._prompt 读
     - 每轮调 _inject_reminders 把 <system-reminder> 块塞到 messages[-2]
+
+    v1.1 改造点:
+    - 新增 hook_dispatcher 参数(可为 None,v1.0 行为)
+    - lifecycle event(session.start/end, turn.start/end, message.received/sent,
+      tool.pre/post)在 run() / 每轮迭代 / add_* 触发点 fire
+    - _v5_executor 改为 v1.1 pipeline:L1 → hook.pre → L2-L5 → execute → hook.post
     """
 
     def __init__(
@@ -137,6 +144,7 @@ class Agent:
         skill_filter: "Any | None" = None,
         skill_activation: "Any | None" = None,
         skill_registry: "Any | None" = None,
+        hook_dispatcher: "Any | None" = None,
     ) -> None:
         if config is None:
             raise ValueError("Agent requires AppConfig in v0.4+")
@@ -176,6 +184,11 @@ class Agent:
         self._skill_filter: Any = skill_filter
         # v1.0: Skill 激活状态(用于 _inject_reminders 注入 active_skills section)
         self._skill_activation: Any = skill_activation
+        # v1.1: Hook 事件分发器(lazy import 写在内部方法,避免 module-load 污染)
+        # —— None 时完全走 v1.0 行为(无 lifecycle event / 无 hook.pre / 无 hook.post)
+        self._hook_dispatcher: Any = hook_dispatcher
+        # v1.1: stable_system slot 的 hook prompt 覆盖(append 进 stable_system 末尾)
+        self._hook_stable_overrides: list[str] = []  # loaded on session.start
         # v0.8: 两层 memory index — bootstrap 后立即读出 index 文本,灌进
         # PromptBuilder 让 LLM 在每轮请求前就知道已有笔记,避免重复 add。
         memory_index_user, memory_index_project = _read_memory_indices(
@@ -371,21 +384,38 @@ class Agent:
 
         v0.7 增量:每轮迭代顶部先检查手动压缩请求,再跑自动压缩;
         Layer-2 失败用 `CompactionError` → `StopReason.COMPACTION_FAILED`。
+
+        v1.1 增量:lifecycle 事件触发
+        - session.start 在 run 入口 fire(try 之前)
+        - session.end 在 finally fire(cancel / exception 也覆盖)
+        - turn.start 在每次迭代顶部 fire
+        - turn.end 在每次迭代尾部 fire(在 yield 完 done 之前)
+        - message.received 在 conversation.add_user 之前 fire
+        - message.sent 在 conversation.add_turn 之后 fire
         """
         self._cancel_event.clear()
+        # v1.1:message.received(在 add_user 之前)
+        self._fire_lifecycle_safe("message.received", user_message)
         self._conversation.add_user(user_message)
         guard_state = GuardState()
         session_usage = UsageStats()
         iteration = 0
         terminate_reason: StopReason | None = None
 
+        # v1.1:session.start
+        self._fire_lifecycle_safe("session.start", None)
+
         try:
             while iteration < self._max_iterations:
                 iteration += 1
+                # v1.1:turn.start
+                self._fire_lifecycle_safe("turn.start", iteration)
                 yield AgentEvent.progress(iteration, self._max_iterations, "streaming")
 
                 # ---- v0.7:手动压缩优先(/compact 触发)----
                 if self._compact_requested and self._compact_ctx is not None:
+                    # v1.1:system.compaction 事件
+                    self._fire_lifecycle_safe("system.compaction", "manual")
                     self._compact_requested = False
                     try:
                         new_msgs, result = await maybe_compact(
@@ -529,9 +559,23 @@ class Agent:
                 if terminate_reason is not None:
                     break
 
+                # v1.1:turn.end(在 yield done / 重新迭代前)
+                self._fire_lifecycle_safe("turn.end", iteration)
+                # v1.1:message.sent(Assistant turn 已 add_turn)
+                if self._conversation is not None:
+                    try:
+                        self._fire_lifecycle_safe("message.sent", iteration)
+                    except Exception:
+                        pass
+
                 # v0.5:deny 不再终止 Agent Loop,只通过 reminder 提示 LLM
                 # 老的 check_deny_threshold() 已 no-op,这里不再 break
         finally:
+            # v1.1:system.cancel(若用户取消)
+            if self._cancel_event.is_set():
+                self._fire_lifecycle_safe("system.cancel", "user_interrupt")
+            # v1.1:session.end(无论什么 stop 路径都 fire)
+            self._fire_lifecycle_safe("session.end", None)
             if terminate_reason is None:
                 # 跑完循环但没有显式 reason → 兜底 MAX_ITERATIONS_REACHED
                 terminate_reason = StopReason.MAX_ITERATIONS_REACHED
@@ -552,16 +596,20 @@ class Agent:
         call: ToolCall,
         guard_state: GuardState,
     ) -> ToolResult:
-        """v0.5 executor:5 层防御 + L5 user 决策(v1.0 加 Skill 白名单前置 L2)。
+        """v1.1 executor:hook-aware pipeline。
 
-        流程:
-        0. skill_filter.is_allowed(call) → 不允许 → 立即 deny(累计计数)
-        1. permissions.check(call, self._merged) → L1/L2/L3/L4
-        2. deny → 立即返回 is_error(并累计 deny 计数,触发 reminder)
-        3. allow → 直接执行
-        4. fallthrough → 走 L5 user(permission_callback),按用户选择放行/拒绝
+        顺序:L1 → hook.pre → L2-L5 → execute → hook.post。
+        - hook.pre 拒 → ToolResult(execution_status=block_hook_pre, denied_by=hook_pre)
+        - L1 拒 → ToolResult(execution_status=block_l1, denied_by=l1_blacklist)
+        - L2-L5 拒 → ToolResult(execution_status=block_permission, denied_by=l2_l5_permission)
+        - execute 成功 → ToolResult(execution_status=executed_success, is_error=False)
+        - execute 异常 → ToolResult(execution_status=executed_failed, is_error=True)
+        hook.post 在 finally 块 fire,覆盖以上所有路径。
+
+        v0.5 兼容:hook_dispatcher 为 None 时仍走原来的 L0 Skill 白名单 + L1-L5
+        permissions.check()(不带 hook.pre / hook.post)。
         """
-        # L0 (v1.0 Skill 动态白名单)— 早于 v0.5 五层防御
+        # L0 (v1.0 Skill 动态白名单)— 早于 hook.pre / 五层防御
         if self._skill_filter is not None and not self._skill_filter.is_allowed(call):
             record_denial_warn(guard_state, call.name)
             return ToolResult(
@@ -573,25 +621,149 @@ class Agent:
                 is_error=True,
             )
 
+        if self._hook_dispatcher is None:
+            # v1.0 路径(无 hooks)
+            return await self._v5_legacy_executor(call, guard_state)
+
+        # ============ v1.1 hook-aware pipeline ============
+        from baozicode.permissions import blacklist_check, check_layers_2_through_5
+
+        # Step 1: L1 hard blacklist(早于 hook.pre,不可被 hook.allow 绕过)
+        try:
+            l1 = blacklist_check(call)
+        except Exception as exc:
+            log.warning("hook pipeline: blacklist_check 异常,跳过 L1: %s", exc)
+            l1 = None
+        if l1 is not None and l1.decision == "deny":
+            record_denial_warn(guard_state, call.name)
+            result = ToolResult(
+                tool_call_id=call.id,
+                content=f"L1 硬黑名单拒绝: {l1.reason}",
+                execution_status="block_l1",
+                denied_by="l1_blacklist",
+            )
+            self._fire_hook_post_safe(call, result)
+            return result
+
+        # Step 2: hook.pre(同步,首个 deny 短路)
+        hook_deny = self._fire_hook_pre_safe(call)
+        if hook_deny.denied:
+            record_denial_warn(guard_state, call.name)
+            result = ToolResult(
+                tool_call_id=call.id,
+                content=f"hook.pre 拒绝 ({hook_deny.denied_hook_id}): {hook_deny.reason}",
+                execution_status="block_hook_pre",
+                denied_by="hook_pre",
+                denied_hook_id=hook_deny.denied_hook_id,
+            )
+            self._fire_hook_post_safe(call, result)
+            return result
+
+        # Step 3: L2-L5(跳过 L1,L1 已独立跑过)
+        try:
+            decision = check_layers_2_through_5(call, self._merged)
+        except Exception as exc:
+            log.warning("hook pipeline: check_layers_2_through_5 异常: %s", exc)
+            decision = None
+        if decision is not None and decision.decision == "deny":
+            record_denial_warn(guard_state, call.name)
+            result = ToolResult(
+                tool_call_id=call.id,
+                content=f"权限拒绝 ({decision.layer}): {decision.reason}",
+                execution_status="block_permission",
+                denied_by="l2_l5_permission",
+            )
+            self._fire_hook_post_safe(call, result)
+            return result
+
+        # Step 4: execute(工具真正跑)+ try/except 把异常转 executed_failed
+        try:
+            raw_result = await execute_tool_call(call)
+            result = ToolResult(
+                tool_call_id=call.id,
+                content=raw_result.content,
+                execution_status="executed_success" if not raw_result.is_error else "executed_failed",
+                offloaded_to=raw_result.offloaded_to,
+                original_size=raw_result.original_size,
+            )
+        except Exception as exc:
+            log.warning("tool execution failed: %s", exc)
+            result = ToolResult(
+                tool_call_id=call.id,
+                content=f"tool execution error: {exc}",
+                execution_status="executed_failed",
+            )
+        self._fire_hook_post_safe(call, result)
+        return result
+
+    async def _v5_legacy_executor(
+        self,
+        call: ToolCall,
+        guard_state: GuardState,
+    ) -> ToolResult:
+        """v0.5/v1.0 兼容 executor:无 hooks 时走。"""
         from baozicode.permissions import check as perms_check
 
         decision = perms_check(call, self._merged)
-
         if decision.decision == "deny":
             record_denial_warn(guard_state, call.name)
             return ToolResult(
                 tool_call_id=call.id,
-                content=(
-                    f"工具调用被 {decision.layer} 拒绝: {decision.reason}"
-                ),
+                content=f"工具调用被 {decision.layer} 拒绝: {decision.reason}",
                 is_error=True,
             )
-
         if decision.decision == "allow":
             return await execute_tool_call(call)
-
-        # fallthrough → L5 user
         return await self._handle_user_decision(call, guard_state)
+
+    def _fire_hook_post_safe(self, call: ToolCall, result: ToolResult) -> None:
+        """tool.post 在 finally 同步 fire;hook 异常容错(fail-open)。"""
+        if self._hook_dispatcher is None:
+            return
+        try:
+            self._hook_dispatcher.run("tool.post", result)
+        except Exception as exc:
+            log.warning("hook tool.post 异常: %s", exc)
+
+    def _fire_hook_pre_safe(self, call: ToolCall) -> "Any":
+        """tool.pre 同步 fire(其他生命周期事件也走这个口径)。"""
+        if self._hook_dispatcher is None:
+            from baozicode.hooks.dispatcher import HookResult
+            return HookResult()
+        try:
+            return self._hook_dispatcher.run("tool.pre", call)
+        except Exception as exc:
+            log.warning("hook tool.pre 异常,继续: %s", exc)
+            from baozicode.hooks.dispatcher import HookResult
+            return HookResult()
+
+    def _fire_lifecycle_safe(self, event: str, payload: Any) -> None:
+        """统一 lifecycle 事件触发(fail-open:异常仅 log)。"""
+        if self._hook_dispatcher is None:
+            return
+        try:
+            self._hook_dispatcher.run(event, payload)
+        except Exception as exc:
+            log.warning("hook lifecycle event %s 异常: %s", event, exc)
+
+    def set_dynamic_section(self, name: str, content: str) -> None:
+        """v1.1 hook prompt slot=stable_system 调这个,append 进 stable_system 末尾。"""
+        # 仅 hook_overrides 这一个 name 接受覆盖;其他忽略
+        if name != "hook_overrides":
+            return
+        self._hook_stable_overrides.append(content)
+        # 重建 stable_system 把 override 拼接进来
+        if self._prompt:
+            extras = "\n\n".join(self._hook_stable_overrides)
+            new_stable = self._prompt.stable_system + (
+                "\n\n## Hook Overrides\n" + extras if extras else ""
+            )
+            self._prompt = BuiltPrompt(
+                stable_system=new_stable,
+                dynamic_messages=self._prompt.dynamic_messages,
+                augmented_tools=self._prompt.augmented_tools,
+                cache_breakpoints=self._prompt.cache_breakpoints,
+            )
 
     async def _handle_user_decision(
         self,
