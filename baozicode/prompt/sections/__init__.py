@@ -2,6 +2,7 @@
 
 from baozicode.prompt.sections import (  # noqa: F401
     action_exec,
+    agents,
     constraints,
     custom,
     env_info,
@@ -16,6 +17,7 @@ from baozicode.prompt.sections import (  # noqa: F401
 
 __all__ = [
     "action_exec",
+    "agents",
     "constraints",
     "custom",
     "env_info",

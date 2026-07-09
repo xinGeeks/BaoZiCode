@@ -212,6 +212,11 @@ class Agent:
             self._config, project_root=project_root,
         )
         # PromptBuilder 构造一次,后续 run 都复用
+        # v1.2:主 Agent 接 AgentRegistry 进 stable_system('可用 SubAgent' 段);
+        # sub-Agent 不接(它自己没子任务)。
+        agent_registry = None
+        if subagent_manager is not None and subagent_meta is None:
+            agent_registry = getattr(subagent_manager, 'registry', None)
         self._prompt: BuiltPrompt = PromptBuilder().build(
             self._config,
             plan_mode=self._plan_mode,
@@ -220,6 +225,7 @@ class Agent:
             memory_index_user=memory_index_user,
             memory_index_project=memory_index_project,
             skill_registry=skill_registry,
+            agent_registry=agent_registry,
         )
 
     # ---- public API ----

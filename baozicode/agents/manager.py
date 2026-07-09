@@ -130,6 +130,14 @@ class SubAgentManager:
 
     # ---- 查询 API ----
 
+    @property
+    def registry(self) -> "Any | None":
+        """暴露底层 AgentRegistry 给 prompt section / TUI 查询用。
+
+        返回 None 当且仅当 runtime 未注入(bug 兜底)。
+        """
+        return getattr(self._runtime, "_registry", None)
+
     def get_task(self, task_id: str) -> TaskInfo | None:
         return self._tasks.get(task_id)
 

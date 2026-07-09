@@ -58,6 +58,9 @@ class BuildContext:
     # v1.0:SkillRegistry 实例 — `skills` section 用它枚举「可用 Skill 列表」;
     # None 时走 v0.4 旧路径(扫 config.skills_dir)
     skill_registry: Any = None
+    # v1.2:AgentRegistry 实例 — `agents` section 用它枚举「可用 SubAgent 列表」;
+    # None / 全 hidden → 跳过该 section
+    agent_registry: Any = None
 
 
 @dataclass
