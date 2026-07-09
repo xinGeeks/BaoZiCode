@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-1.1.0-blue)
+![version](https://img.shields.io/badge/version-1.2.0-blue)
 
 ## 是什么
 
@@ -12,9 +12,9 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
 - ⚡ **流式响应** — 边收边渲染（代码块自动语法高亮）
 - 🔌 **四后端** — Anthropic Claude / OpenAI GPT / MiniMax / DeepSeek，YAML 一键切换
 - 🎨 **Textual TUI** — 现代终端界面，输入框、流式输出、ASCII 包子 banner
-- 🛠️ **斜杠命令** — `/help` `/clear` `/exit` `/model` `/tools` `/permissions` +
-  `/plan` `/do` `/auto` `/stop` `/status` `/mcp` `/compact` +
-  `/resume` `/memory` `/new`
+- 🛠️ **斜杠命令（v0.9 起 11 个）** — `/help /compact /clear /plan /do /session
+  /memory /permission /status /review /skill`（v0.9 起 删除
+  `/exit /model /tools /permissions /auto /stop /mcp`,`/resume /new` 合并入 `/session`）
 - 🔁 **Agent Loop（v0.3 核心）** — ReAct 自主循环,一次消息可跨多轮(默认 20 轮),
   自动判断何时停止(模型说完 / 迭代上限 / 取消 / 连续幻觉 / 拒绝累积 / 失败死循环)
 - 🧰 **7 个工具** — Read / Write / Edit / Bash / Grep / Glob / WebFetch,side_effect 标记驱动并发调度
@@ -91,7 +91,7 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
     点击展开看 sub-Agent streaming text;完成时 `App.notify` 弹 toast
   - **2 个内置样板 agent**:只读 `explorer`(Read/Grep/Glob/WebFetch) +
     `summarizer`(Read/Grep/Glob + haiku,适合长篇压缩)
-  - 详细迁移 + 字段表 + 4 条派发路径详解 + 8 个 FAQ 见
+  - 详细迁移 + 字段表 + 4 dispatch 组合 + 5 FAQ 见
     `docs/migrations/v1.1-to-v1.2.md`
 
 - ✅ **Skill 系统(v1.0 新增)** — `baozicode/skills/`
@@ -317,6 +317,9 @@ python -m baozicode                # 等价
 
 **系统级（始终放行，不受白名单/Plan Mode 约束）**：
 - `load_skill` — v1.0 Skill 加载器，LLM 调它把 Skill body 钉进当前会话的 active_skills reminder
+- `task` — v1.2 sub-Agent 派发器（`type="definition"|"fork"`+`role`+`prompt`,
+  `async` 默认 true；definition 派独立角色跑完摘要回流,fork 共享主对话
+  历史让首次 LLM 请求命中 prompt cache）
 
 ## Skill 系统（v1.0）
 
@@ -343,55 +346,6 @@ allowed-tools: [Bash, Read]                # 启动期 L1 校验存在性
 history-bubbles: 3                         # 独立模式带几条历史进子对话
 ---
 根据 `git diff --staged` 生成 conventional commit message 并执行 commit。
-
-## SubAgent 委派(v1.2)
-
-主 Agent 通过 `task` 工具把子任务派给隔离的 **sub-Agent** — 每个 sub-Agent 跑独立
-对话上下文、用受限工具集、有独立权限追踪。子 Agent 跑完结果异步回流主 Agent,
-主对话历史不再被 sub-tool 调用污染。
-
-### 两条派发路径
-
-- **definition 模式** — 派独立角色跑 AgentDef.frontmatter
-  ```
-  {"type": "definition", "role": "explorer",
-   "prompt": "扫 src/ 列出所有 .py 文件", "async": true}
-  ```
-- **fork 模式** — 共享主 Agent 历史(prompt cache 命中,省钱)
-  ```
-  {"type": "fork", "prompt": "基于上面结果筛匹配 pattern X 的文件"}
-  ```
-
-> `async: true`(默认)→ 派完即返回 task_id 后台跑;`async: false` 阻塞等结果
-> (可设 `timeout_seconds` 超时自动切后台);**fork 强制后台**(sync 路径 warning 后强制 async)。
-
-### 角色定义
-
-```markdown
-<!-- ~/.config/baozicode/agents/explorer/AGENT.md -->
----
-name: explorer
-description: 只读探索仓库
-tools: [Read, Grep, Glob, WebFetch]
-model: sonnet
-max-iterations: 8
-permission-mode: permissive
----
-你是只读探索 agent。禁止任何写操作,禁止 sub-Agent 嵌套(task 工具被硬禁)。
-```
-
-**加载优先级**(同名覆盖):项目 `.baozicode/agents/` > 用户 `~/.config/baozicode/agents/`
-> 内置 `<pkg>/baozicode/agents/builtin/` > MCP plugin(server 暴露 `agents://list`)。
-
-**工具过滤 4 层 AND**:`GLOBAL_DENY={task}` → `role.tools` → `role.tools-deny`
-→ `background_whitelist`(默认 Read/Grep/Glob/WebFetch/notify_complete)。任一层空集 → 拒绝派发。
-
-**状态回流**:
-- 主 Agent idle → 直接 `add_user("[role 子对话结果]\n...")` 进主对话
-- 主 Agent running → 走 `enqueue_reminder("subagent_result")` 下轮顶部消费
-- 任一终态 → TUI 弹 `App.notify` toast + `SubAgentCard` 折叠卡片(点开展开)
-
-详细:[docs/migrations/v1.1-to-v1.2.md](./docs/migrations/v1.1-to-v1.2.md)
 
 ## SOP
 1. 调 `Bash` 跑 `git diff --staged --stat`
@@ -459,6 +413,106 @@ skills:
 ```
 
 整块可省略;`enabled: false` → 整套空集 + 不注册 `load_skill` 工具,退回 v0.9。
+
+## SubAgent 委派（v1.2）
+
+主 Agent 通过 `task` 工具把子任务派给隔离的 **sub-Agent** —— 每个 sub-Agent 跑独立
+对话上下文、用受限工具集、有独立权限追踪。子 Agent 跑完结果异步回流主 Agent,
+主对话历史不再被 sub-tool 调用污染。
+
+### 两条派发路径
+
+- **definition 模式** —— 派独立角色跑 AgentDef.frontmatter
+  ```json
+  {"type": "definition", "role": "explorer",
+   "prompt": "扫 src/ 列出所有 .py 文件", "async": true}
+  ```
+- **fork 模式** —— 共享主 Agent 历史(prompt cache 命中,省钱)
+  ```json
+  {"type": "fork", "prompt": "基于上面结果筛匹配 pattern X 的文件"}
+  ```
+
+`async: true`(默认)→ 派完即返回 task_id 后台跑;`async: false` 阻塞等结果
+(可设 `timeout_seconds` 超时自动切后台);**fork 强制后台**(sync 路径打 warning
+后强制 async 走后台)。
+
+### 三种进入后台的方式
+
+| 方式 | 触发 | 备注 |
+|------|------|------|
+| **显式 `async: true`** | LLM 调 `task` 工具时直接传 | 默认行为,派完返回 task_id |
+| **sync 超时** | `async: false` + `timeout_seconds`,子 Agent 跑超时 | 自动切后台,本轮不阻塞 |
+| **手动切** | `request_subagent_async(task_id)` 手动 demote running sync task | 调试 / 想取消时用 |
+
+### 角色定义
+
+```markdown
+<!-- ~/.config/baozicode/agents/explorer/AGENT.md -->
+---
+name: explorer
+description: 只读探索仓库
+tools: [Read, Grep, Glob, WebFetch]
+model: sonnet
+max-iterations: 8
+permission-mode: permissive
+---
+你是只读探索 agent。禁止任何写操作,禁止 sub-Agent 嵌套(task 工具被硬禁)。
+```
+
+**加载优先级**(同名覆盖):项目 `.baozicode/agents/` > 用户
+`~/.config/baozicode/agents/` > 内置 `<pkg>/baozicode/agents/builtin/`
+(`explorer` / `summarizer` 两个样板)> MCP plugin(server 暴露 `agents://list`)。
+
+### 工具过滤 4 层 AND
+
+```
+GLOBAL_DENY = {task}     # L1 ── 硬禁嵌套(子 Agent 不能调 task 工具)
+role.tools: [...]        # L2 ── 角色白名单(None = 全允许)
+role.tools_deny: [...]   # L3 ── 角色黑名单
+background_whitelist     # L4 ── 后台模式额外白名单(默认 Read / Grep / Glob /
+                         #       WebFetch / notify_complete)
+```
+
+任一层过滤后为空 → `ToolFilterEmptyError`,dispatch 时被捕获转 `ToolResult(is_error=True)`。
+
+### 状态回流
+
+| 主 Agent 状态 | 子 Agent 完成 | 回流方式 |
+|--------------|--------------|---------|
+| idle | 子 Agent done | 直接 `add_user("[role 子对话结果]\n...")` 进主对话,主 Agent 下条 user 消息触发 run |
+| running | 子 Agent done | `enqueue_reminder("subagent_result")` 在下轮顶部消费 |
+
+任一终态 → TUI 弹 `App.notify` toast + `SubAgentCard` 折叠卡片(点开展开
+sub-Agent streaming text,终态颜色:done/canceled 绿边,failed 红边)。
+
+### Cascade cancel
+
+主 Agent `cancel()` 检测自己有 `_subagent_manager` → 调 `manager.cancel_all()`
+→ 所有 running 的 sub-Agent 5s 内通过 `cancel_event` 信号停掉。子 Agent 取消后
+走 `state=canceled` 终态回流(同 done 路径)。
+
+### MCP Plugin Agent(可选)
+
+如果 MCP server 实现 `agents://list` + `agents://<name>` 资源协议,启动时会自动
+拉 AgentDef 注册到 SubAgentManager(同名按项目 > 用户 > 内置 > plugin 优先级)。
+
+```python
+# server 端契约示例
+async def read_resource(uri: str) -> dict:
+    if uri == "agents://list":
+        return {"contents": [{"text": json.dumps([
+            {"name": "browser", "description": "浏览器自动化", "version": "1"},
+        ])}]}
+    if uri == "agents://browser":
+        return {"contents": [{"text": "---\nname: browser\n...\n---\n... body ..."}]}
+    raise ValueError("unknown uri")
+```
+
+降级:server 端异常 → 跳过该 server;agent 详情拉取失败 → 跳过该 agent。
+
+---
+
+详细:[docs/migrations/v1.1-to-v1.2.md](./docs/migrations/v1.1-to-v1.2.md)
 
 ## 权限系统（v0.5 五层防御）
 
@@ -616,8 +670,8 @@ baozicode/
 │   ├── filter.py           # ToolFilter(4 层 AND + GLOBAL_DENY={task} + cache)
 │   ├── runtime.py          # SubAgentRuntime(spawn — 状态隔离 + BuiltPrompt 分流)
 │   ├── manager.py          # SubAgentManager(dispatch 派发 + 状态机 + cascade cancel)
+│   │                       #   + TASK_TOOL + task_executor(`task` 工具暴露给主 Agent)
 │   ├── plugin.py           # fetch_plugin_agents(MCP resources/read 协议)
-│   ├── task_tool.py        # TASK_TOOL + task_executor(暴露给主 Agent)
 │   └── builtin/            # 2 个样板 sub-Agent
 │       ├── explorer/AGENT.md  # definition + tools=[Read,Grep,Glob,WebFetch]
 │       └── summarizer/AGENT.md  # definition + model=haiku
