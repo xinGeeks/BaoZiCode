@@ -199,8 +199,6 @@ The project README MUST document the three `permissions*.yaml` file paths, the m
 - **WHEN** a user copies the example `.gitignore` snippets from the README
 - **THEN** `.baozicode/permissions.local.yaml` is included in the recommended ignore pattern
 
-## v0.8 ADDED Requirements
-
 ### Requirement: MemoryConfig schema
 The system MUST expose a `MemoryConfig` Pydantic model in `baozicode/config/schema.py` with the following fields and defaults:
 
@@ -318,11 +316,10 @@ agent:
   time_gap_threshold_hours: 8      # gap after which /resume inserts reminder
 ```
 
-## v1.1 deltas
-
-Adds v1.1 `hooks:` block to `AppConfig` and `config.yaml`. The hooks block follows the
-same embedded-block pattern as `instructions` / `memory` / `sessions` / `commands` /
-`skills`. The bootstrap order is updated so hooks are loaded right after permissions.
+#### Scenario: config.example.yaml contains the v0.8 block
+- **WHEN** a user reads `config.example.yaml`
+- **THEN** it includes commented examples for the `memory:`, `sessions:`,
+  and `agent.time_gap_threshold_hours` fields as documentation
 
 ### Requirement: AppConfig.hooks field
 The system MUST extend `baozicode/config/schema.py` `AppConfig` with an optional
@@ -523,3 +520,85 @@ ERROR: hooks validation failed (3 errors):
   ERROR: hooks validation failed (1 error):
     - hooks[bad]: <reason>
   ```
+
+### Requirement: WorktreeConfig schema (NEW)
+
+`SubAgentsConfig` MUST expose an optional nested field
+`worktree: WorktreeConfig | None` in v1.3. The system MUST use the
+following Pydantic model definition for `WorktreeConfig`:
+
+```python
+class WorktreeConfig(BaseModel):
+    enabled: bool = True  # 总开关(冗余,real decision 来自 frontmatter isolation)
+    link_paths: list[str] = [".venv", "node_modules", ".cargo"]
+    copy_paths: list[str] = [
+        ".baozicode/BaoZiCode.md",
+        ".env",
+        "config.yaml",
+        ".claude/",
+    ]
+    retention_minutes: int = 60
+    daemon_interval_seconds: int = 60
+    max_concurrent_worktrees: int = 5
+```
+
+#### Scenario: SubAgentsConfig with worktree block
+- **WHEN** YAML 含 `subagents.worktree.link_paths: [.venv,
+  custom_lib]`(覆盖默认)
+- **THEN** `AppConfig.subagents.worktree.link_paths == [".venv",
+  "custom_lib"]`(覆盖 Pydantic 默认 list)
+
+#### Scenario: SubAgentsConfig without worktree block
+- **WHEN** YAML 没 `subagents.worktree:` 子键
+- **THEN** `AppConfig.subagents.worktree is None`;bootstrap 路
+  径用 `WorktreeConfig()` 全默认对象兜底
+
+#### Scenario: Pydantic validates bad types
+- **WHEN** YAML 含 `subagents.worktree.retention_minutes: -5`
+- **THEN** `AppConfig` 加载报错 Pydantic `greater_than_equal
+  错误(retention_minutes 必须 ≥ 0)`
+
+#### Scenario: Max concurrent cap enforced
+- **WHEN** YAML 含 `subagents.worktree.max_concurrent_worktrees:
+  100`
+- **THEN** `WorktreeManager` 创建第 `max_concurrent_worktrees +
+  1` 个 worktree 时,**默认**仍允许(只 warn + 继续);worker
+  count 可通过 `/status` 看到
+
+### Requirement: config.example.yaml update (NEW)
+
+`config.example.yaml` MUST contain an inline, documented example block
+for `subagents.worktree` in v1.3:
+
+```yaml
+subagents:
+  enabled: true
+  max_concurrent: 5
+  default_timeout_seconds: 300
+  task_retention_minutes: 5
+  plugins_enabled: true
+  background_whitelist: [Read, Grep, Glob, WebFetch, notify_complete]
+
+  # v1.3 嵌套块 — Worktree Isolation 配置
+  worktree:
+    enabled: true
+    link_paths:
+      - .venv
+      - node_modules
+      - .cargo
+    copy_paths:
+      - .baozicode/BaoZiCode.md
+      - .env
+      - config.yaml
+      - .claude/
+    retention_minutes: 60
+    daemon_interval_seconds: 60
+    max_concurrent_worktrees: 5
+```
+
+#### Scenario: User copies example to config.yaml
+- **WHEN** 用户从 `config.example.yaml` 复制 `subagents.worktree`
+  段到自己 `config.yaml`
+- **THEN** `WorktreeConfig` 加载该段成功 + `WorktreeInitializer`
+  按 `link_paths` / `copy_paths` 初始化 worktree
+

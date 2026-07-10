@@ -160,15 +160,7 @@ The system MUST continue to apply the `FAILED_TOOL_LOOP` guard: when the same to
 - **THEN** the denial MUST NOT increment the `FAILED_TOOL_LOOP` counter
 - **AND** MUST increment only the `consecutive_denials` counter (used for soft warning)
 
-## v1.1 deltas
-
-Modifications to the v0.5 tool-pipeline to add v1.1 `execution_status`, `denied_by`, and
-`denied_hook_id` fields on `ToolResult`, plus the v1.1 hook-aware pipeline
-(`L1 → hook.pre → L2-L5 → execute → hook.post`). The `ToolDefinition` fields stay
-unchanged (only `ToolResult` gets new fields); the four action types and pipeline
-ordering live in the `hooks-lifecycle` spec.
-
-### Requirement: Tools have a unified internal representation
+### Requirement: Tools have a unified internal representation (v1.1)
 The system MUST represent every available tool as a `ToolDefinition` dataclass with `name: str`, `description: str`, `parameters: dict` (JSON Schema), `risk: Literal["low", "high"]`, `side_effect: bool` (default `False`), `path_args: list[str]` (default `[]`, naming which arguments are filesystem paths), and `tool_type: Literal["internal", "external"]` (default `external`, set to `internal` for system tools like `load_skill` that bypass user Skill whitelists) fields. The system MUST represent a tool invocation emitted by the LLM as a `ToolCall` dataclass with `id: str`, `name: str`, and `arguments: dict` fields. The system MUST represent a tool's outcome as a `ToolResult` dataclass with `tool_call_id: str`, `content: str`, `is_error: bool` (derived value — see Scenario), `offloaded_to: Path | None` (default `None`, populated by the v0.7 Layer-1 offload engine when the content is written to `.baozicode/context/<session>/<block>.json`), `original_size: int` (default `0`, the original byte length of `content` before any offload replaced it with a preview), `execution_status: Literal["block_l1", "block_hook_pre", "block_permission", "executed_success", "executed_failed"] | None` (default `None`, populated by the v1.1 hook-aware executor; `None` means "constructed without v1.1 pipeline awareness"), `denied_by: Literal["l1_blacklist", "hook_pre", "l2_l5_permission"] | None` (default `None`, populated only when `execution_status` is a `block_*` value), and `denied_hook_id: str | None` (default `None`, populated only when `denied_by == "hook_pre"` to record which hook's denial produced this result) fields. These three dataclasses are the internal contract between the tool implementations, the LLM backends, and the TUI layer — backend SDK types MUST NOT leak past `baozicode/llm/`.
 
 The `is_error` field MUST be computed as `is_error = (execution_status is not None and execution_status != "executed_success")` whenever `execution_status` is set. When `execution_status is None` (legacy or out-of-band construction), `is_error` is whatever the caller explicitly passed.
@@ -272,6 +264,58 @@ The system MUST invoke L1 BEFORE hook.pre — a hook.pre rule MUST NOT be able t
 - **AND** the pipeline continues as if the hook returned allow (hook.pre failures do not deny)
 - **AND** `tool.post` still fires after the resulting permission check / execution
 
-### Requirement: No new requirement body
-This section is intentionally a placeholder. The MODIFIED block above captures all
-v1.1 deltas to this capability. (Required by spec format.)
+### Requirement: Bash tool optional `cwd` parameter (NEW)
+
+In v1.3, `Bash.execute(arguments)` MUST 接受 optional
+`cwd: str | None = None` 参数:
+
+- 缺省(`cwd=None`)→ **现有 v1.2 行为完全不变**(`BashSession.
+  plan_cd` + 更新 `_sessions.cwd`)
+- 非缺省 → `cwd` 作为 `asyncio.create_subprocess_shell` 的
+  `cwd=...` 参数;**不**调 `plan_cd`,**不**更
+  `_sessions.cwd`(fire-and-forget)
+
+**安全校验**:
+
+- `cwd` 必须是绝对路径
+- `cwd` 必须 resolve 后在某个有效 root 内(main project_root
+  或 sub-Agent 的 worktree path);通过 closure `_cwd_validator`
+  判定(`SubAgentManager` 在 spawn 时注入)
+
+#### Scenario: Default cwd unchanged (zero compat break)
+- **WHEN** Bash 调 `execute({"command": "ls"})`(没有 cwd)
+- **THEN** 走现有 `BashSession.plan_cd` + `_sessions.cwd` 跟
+  踪,v1.2 行为**完全**不变
+
+#### Scenario: Explicit cwd from worktree sub-Agent
+- **WHEN** worktree sub-Agent 调
+  `execute({"command": "ls src/", "cwd": "<worktree_path>"})`
+- **THEN** `subprocess` 用 `cwd=<worktree_path>` 跑;`_sessions
+  .cwd` **不**变;执行结果正常返回
+
+#### Scenario: cwd relative rejected
+- **WHEN** Bash 调 `execute({"command": "ls", "cwd": "./src"})`
+- **THEN** 拒绝,`ToolResult.error_result("", "Bash: cwd 必须
+  是绝对路径,得到 './src'")`
+
+#### Scenario: cwd outside any root rejected
+- **WHEN** Bash 调
+  `execute({"command": "ls", "cwd": "/etc/passwd"})`
+- **THEN** 拒绝,`ToolResult.error_result("", "Bash: cwd
+  '/etc/passwd' 不在任何有效 root 内")`;closure
+  `_cwd_validator` 判定 escape
+
+#### Scenario: cwd set_cwd_validator closure injection
+- **WHEN** `SubAgentManager._run_subagent` 跑前调
+  `baozicode.tools.bash.set_cwd_validator(...)` 注入 closure,
+  跑完调 `set_cwd_validator(None)` 清
+- **THEN** Bash.execute 在 `cwd` 校验时调用最新 closure;主
+  Agent 不传就 `_cwd_validator is None` → 校验退回到 main
+  project_root(`session._is_inside`)
+
+#### Scenario: Bash ToolDefinition schema updated
+- **WHEN** LLM 收到 `task` 工具 + Bash 工具描述
+- **THEN** Bash 工具 schema 含
+  `cwd: string (optional)` 字段 + description 说明 "绝对路径,
+  留空走默认 session cwd"
+
