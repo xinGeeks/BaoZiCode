@@ -1,54 +1,53 @@
-/* BaoZiCode TUI 样式 */
+/* BaoZiCode TUI 样式 — 参考 Claude Code 风格:无可见边框、紧凑间距、零冗余 */
 
 Screen {
     background: $surface;
 }
 
+/* 主对话区:无边框 / 无 padding(只有 1 列水平 margin 让文字不贴边)
+   内容靠自身 margin 撑行间距,Claude Code 风格 */
 #chat-scroll {
     height: 1fr;
-    border: tall $primary;
-    border-title-align: left;
-    padding: 1 1;
+    padding: 0 1;
 }
 
-/* Textual 8.x: VerticalScroll 里的子节点默认 height 不是 auto，
-   必须显式声明才能撑出实际行高（否则 banner / Static / Markdown 都塌成 1 行） */
+/* Textual 8.x: VerticalScroll 里的子节点默认 height 不是 auto,
+   必须显式声明才能撑出实际行高(否则 banner / Static / Markdown 都塌成 1 行) */
 #chat-scroll > Static,
 #chat-scroll > Markdown {
     width: 100%;
     height: auto;
 }
 
-/* Textual 8.x: Input 在 Screen 下是兄弟节点。如果不 dock，会按 CSS height 100%
-   占满整个屏幕，把 #chat-scroll (height: 1fr) 挤到 0 行高。
-
-   v0.3:StatusBar 也占底部 1 行,与 Input 一起占底部 4 行。
-   把 StatusBar 放在 DOM 里位于 Scroll 与 Input 中间即可,无需 dock。
-
-   v1.3 调整:StatusBar 改成「运行中显示 / 空闲隐藏」(通过 -idle class
-   toggle height 1 ↔ 0)。空闲时给 #chat-scroll 多 1 行用于阅读历史。 */
+/* Input:无左侧/右侧/底部边框,只保留 1 行顶部细分隔线。
+   Claude Code 风格:输入框融入主区域,只有一道线分隔。
+   height: 3 保留(给 Input widget 自身 1 行 + 上下 padding 各 1)。
+   Agent 运行时 StatusBar 额外占 1 行。 */
 #input {
     dock: bottom;
     width: 100%;
     height: 3;
-    border: tall $secondary;
+    border-top: solid $primary;
     padding: 0 1;
 }
 
+/* StatusBar:运行中显 1 行;空闲时折叠(height 0 + display:none)
+   把 1 行还给 #chat-scroll 阅读历史 */
 StatusBar {
     width: 100%;
     height: 1;
     padding: 0 1;
-    background: $panel;
+    background: $surface;
     color: $text-muted;
+    text-style: dim;
 }
-/* v1.3:空闲时折叠 StatusBar(高度 0),把 1 行还给 #chat-scroll 阅读历史。
-   Agent 运行中再加 -visible class 恢复 1 行。 */
 StatusBar.-idle {
     height: 0;
     display: none;
 }
 
+/* 消息间距:Claude Code 风格 — 用户和 assistant 之间无空行,
+   只靠颜色区分,markdown / tool 块自带 padding。 */
 .user-message {
     color: $success;
     text-style: bold;
@@ -57,23 +56,27 @@ StatusBar.-idle {
 
 .assistant-message {
     color: $text;
-    margin: 0 0 1 0;
+    margin: 0;
 }
 
 .error-message {
     color: $error;
     text-style: bold;
+    margin: 1 0 0 0;
 }
 
 .info-message {
     color: $accent;
     text-style: italic;
+    margin: 0;
 }
 
 SystemMessage {
     color: $warning;
     text-style: bold;
 }
+
+/* ---- 弹窗:ModelSelectScreen / PermissionModal 保留独立边框(模态隔离需要) ---- */
 
 ModelSelectScreen {
     align: center middle;
@@ -101,7 +104,25 @@ ModelSelectScreen {
 
 #model-buttons Button {
     width: 100%;
-    margin: 0 0 0 0;
+    margin: 0;
+}
+
+/* ---- Tool 卡片紧凑 ---- */
+
+ToolCallCard {
+    height: auto;
+    margin: 0;
+    padding: 0 1;
+    background: $boost;
+    border-left: thick $primary;
+}
+
+ToolResultCard {
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    background: $boost;
+    border-left: thick $secondary;
 }
 
 /* v1.2:ToolResultCard 按 execution_status 上色。
