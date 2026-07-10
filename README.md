@@ -60,8 +60,18 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   Initializer 4 步初始化(链依赖 / 复制配置 / 配 hooks / 补 gitignore);Bash 工具
   显式注入 `cwd` 参数(不 chdir);退出变更保护(未提交 / 未推送默认拒删),
   CleanupDaemon 三层过滤后台清理。默认关闭,零行为变化
+- 👥 **Team Foundation（v1.4 新增）** — 持久化 Team / Member / Mailbox 数据层
+  + 跨平台 lockfile + 5 子命令 CLI。`Team / Member / Message` frozen
+  dataclass + 严格名字校验(`[a-z0-9-]` 2-30 字符);Mailbox 文件层
+  (`inbox.jsonl` / `outbox.jsonl` / `state.json` / `wake.signal` +
+  `.lock`)原子 JSONL 追加 + 缺字段填默认 + 异步 `wait_for_wake`;
+  `mailbox_lock` 跨平台(POSIX `fcntl.flock` / Windows `msvcrt.locking`)+
+  30s stale 偷锁;`TeamsRegistry` 全局索引 + `TeamStore` 单 team 目录操作;
+  `baozicode team create/list/show/use/destroy` 5 子命令。完整 dispatch /
+  pane 后端 / coordinator 模式留给后续 3 个 proposal(team-tools /
+  pane-backend / coordinator)
 
-## 当前版本：v1.3
+## 当前版本：v1.4 (Foundation)
 
 - ✅ **Worktree 隔离(v1.3 新增 — 主特性)** — `baozicode/worktree/`
   - sub-Agent role frontmatter 加 `isolation: worktree` → 该 sub-Agent 在独立

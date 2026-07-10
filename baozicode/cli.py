@@ -43,6 +43,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="抑制启动 banner(指令 / 记忆 / 会话摘要)",
     )
+    # v1.4:顶层子命令分发(目前只有 `team`);无子命令 → 走 TUI 启动老路径
+    sub = parser.add_subparsers(dest="top_command", metavar="<command>")
+    from baozicode.teams.cli import add_subcommand
+    add_subcommand(sub)
     return parser.parse_args(argv)
 
 
@@ -154,6 +158,17 @@ def _resolve_sessions_root(project_root: Path, config) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+
+    # v1.4:顶层子命令分发(目前只有 `team`);无 top_command → TUI 启动老路径
+    if getattr(args, "top_command", None) == "team":
+        from baozicode.teams import cli as teams_cli
+
+        # argv 是 [prog_name, "team", <flags>, <action>, ...];
+        # teams_cli.main 自己有 argparse,期望从 `["team", ...]` 开始
+        # 解析。把 prog_name 去掉,再在最前面加 "team"。
+        raw = argv[1:] if argv is not None else sys.argv[1:]
+        return teams_cli.main(["team", *raw])
+
     try:
         config = load_config(args.config)
     except ConfigError as exc:

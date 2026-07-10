@@ -147,6 +147,55 @@ sub-Agent 在独立工作目录里跑,主 Agent 与其它 sub-Agent 不被它的
   worktree sub-Agent `env_info.cwd` 段不同 → 打破 byte-identical → 首次 LLM 请求
   cache miss(不引入第二份缓存,复用主 Agent template 只改 cwd 占位符)
 
+### v1.4 范围
+
+v1.4 分 **4 个独立 proposal + 独立 archive** 推进:
+
+- **`v1-4-team-foundation`** (本段 — 已完成)
+  - Team / Member / Message 数据层(`baozicode/teams/schema.py` frozen dataclass +
+    `TeamNameValidator` 严格校验 + 8 个错误枚举)
+  - Mailbox 文件层(`baozicode/teams/mailbox.py` 原子 JSONL append + state.json +
+    wake.signal + 异步 `wait_for_wake`)
+  - 跨平台 lockfile(`baozicode/teams/lockfile.py` POSIX `fcntl.flock` /
+    Windows `msvcrt.locking` + 50ms 退避 + 30s stale 偷锁)
+  - TeamStore + TeamsRegistry(目录操作 + 全局索引)
+  - CLI 子命令(`baozicode/teams/cli.py` 5 子命令 `create / list / show /
+    use / destroy` + 退出码 0-5 + `Error: <Enum>: <detail>` stderr 格式)
+  - App 集成(`BaoZiCodeApp._build_teams_registry` + on_mount + 顶层 CLI 分发)
+- **v1-4-team-tools** (后续) — `team_dispatch` / `team_send_message` /
+  `team_cancel` / `team_merge` 协作工具
+- **v1-4-team-pane-backend** (后续) — tmux / iTerm2 / Windows Terminal
+  pane 后端实际派生 + 唤醒
+- **v1-4-team-coordinator** (后续) — 双锁开关(配置 `teams.coordinator.enabled`
+  + 环境变量 `BAOZICODE_COORDINATOR=1`)+ 剥夺写文件工具
+
+**v1.4 explore 锁定的 12 个决策**(所有后续 proposal 引用):
+
+1. **Pane backend**:tmux / iTerm2 / Windows Terminal 按环境优先级自动选,失败
+   透明降级到 `coroutine`,不静默降级
+2. **Resume load**:从 `state.json` 读全 conversation 上下文,新消息作为 user msg
+   灌入,实现"从磁盘恢复上下文继续指派"
+3. **Merge 冲突**:能自动合并就自动合并,搞不定 `git merge --abort` + 上报,
+   不会留下半成品
+4. **Wake**:Lead `Mailbox.touch_wake(member_dir)` 触发,pane 后端
+   `wait_for_wake` 200ms 轮询 mtime
+5. **Tasks 位置**:`<teams_dir>/<team>/tasks.jsonl` — 共享任务清单放
+   user-global(`teams.dir`),不跟项目走
+6. **Idle 触发**:仅在 task 完成时触发(不是聊天结束),符合 explore 锁定
+7. **Coordinator git**:走 `team_merge` first-class 工具,**不**走 Bash
+   `git merge`(防止 Lead 写出错的 git 命令)
+8. **Approval protocol**:YAML frontmatter(`requires_approval: true`)+ body
+   含 plan,Lead 用 `APPROVED: <id>` / `REJECTED: <id> <reason>` 特定格式回复
+9. **跨 worktree 可见**:Lead 通过 Read 读其他 worktree 路径,
+   v1.3 已有 L2 sandbox whitelist 可复用
+10. **Lead 终止**:Main Loop self-drives 到 end,不靠外部 signal
+11. **Member 命名**:Lead 在 `team_dispatch` 必须显式 `member=<name>`,不自动生成
+12. **Team 生命周期**:Team 是 long-lived + reusable,不被 `destroy` 视为
+    "项目结束就清";只有用户显式 `destroy` 才删
+
+**Foundation 阶段**只覆盖 schema / mailbox / lockfile / lifecycle CLI 这一层
+(决策 8 / 9 / 10 / 12),其余 9 个由后续 3 个 proposal 在此之上实现。
+
 ## 模块结构
 
 ```
@@ -259,6 +308,16 @@ baozicode/
 │       ├── commit/         # shared + Bash/Read
 │       ├── review/         # independent + Bash/Read/Grep + history-bubbles=3
 │       └── test/           # independent + Bash + history-bubbles=2
+├── teams/                  # v1.4 Team Foundation — Team 数据层 + Mailbox + Lockfile + CLI
+│   ├── schema.py           # Team / Member / Message / MemberState frozen dataclass
+│   │                        #   + TeamNameValidator(严格校验)+ BackendType Literal + 8 错误枚举
+│   ├── mailbox.py          # Mailbox.append_message 原子 5 步协议 + read/write state + touch/await wake
+│   ├── lockfile.py         # mailbox_lock(path, *, timeout, stale_seconds) 跨平台
+│   │                        #   (POSIX fcntl.flock / Windows msvcrt.locking)+ 50ms 退避 + 30s 偷锁
+│   ├── store.py            # TeamStore.create/load/from_name/show/add_member/destroy
+│   ├── registry.py         # TeamsRegistry.bootstrap(config) + list_teams/get/create_team/delete_team
+│   ├── cli.py              # add_subcommand(subparsers) + main(argv) — 5 子命令(create/list/show/use/destroy)
+│   └── __init__.py         # 公开 API re-export(Team / Member / Mailbox / mailbox_lock / TeamsRegistry / TeamStore / 错误枚举)
 ├── conversation/
 │   └── manager.py          # 多轮历史(add_turn snapshot 重建,add_tool_result,set_archiver v0.8)
 └── config/
@@ -269,10 +328,12 @@ baozicode/
     │                        #   v0.8:InstructionsConfig / MemoryConfig / SessionsConfig
     │                        #   v0.9:CommandsConfig(review_prompt)
     │                        #   v1.0:SkillsConfig(enabled/builtin_dir/user_dir/project_dir/summary_model/history_bubbles_default)
+    │                        #   v1.4:TeamsConfig(enabled/dir) — AppConfig.teams 可选
     └── loader.py           # YAML + .env + ${VAR} 替换
                              #   v0.5:扫 permissions*.yaml sidecar 合并
                              #   v0.6:两层 mcp_servers 合并 + ${VAR} 展开
                              #   v0.7-v1.0:各新配置块 schema + 旧字段 fallback(memory_path / skills_dir)
+                             #   v1.4:teams 块可选(整块省略 → AppConfig.teams = None,CLI 走默认)
 ```
 
 ## 依赖方向（不要打破）

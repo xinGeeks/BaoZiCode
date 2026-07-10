@@ -2,6 +2,122 @@
 
 BaoZiCode 所有重要变更记录在此。版本号遵循 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。
 
+## [v1.4] — 2026-07 (Foundation)
+
+### 新增能力
+
+v1.4 是分 4 个独立 proposal 推进的大版本。**本段仅覆盖 v1-4-team-foundation**:
+Team 数据层 + Mailbox 文件层 + 跨平台 lockfile + 5 子命令 CLI。
+后续 3 个 proposal 在此之上扩展(team-tools / pane-backend / coordinator)。
+
+- **Team 数据模型**(`baozicode/teams/schema.py`)
+  - `Team` / `Member` / `Message` / `MemberState` frozen dataclass,持久化
+    到 `<teams_dir>/<team>/team.json` 和 `<member>/{inbox,outbox}.jsonl`
+  - `TeamNameValidator.validate(name)` 严格校验:`[a-z0-9-]` 2-30 字符,
+    必须以字母开头、字母数字结尾、拒连续 `--`;拼错立即
+    `TeamNameInvalid` 子类(`TeamNameTooShort` / `TooLong` / `BadChar` /
+    `BadStart` / `BadEnd` / `DoubleHyphen`)
+  - `BackendType` Pydantic Literal 强校验(5 种后端:`pane-tmux` /
+    `pane-iterm2` / `pane-windows-terminal` / `coroutine` /
+    `worktree-coroutine`);LLM 拼错 fail-fast
+  - 8 个错误枚举:`TeamAlreadyExists` / `TeamNotFound` /
+    `MemberAlreadyExists` / `MemberNotFound` 全部从标准 IO 异常派生
+    (`FileExistsError` / `FileNotFoundError`),LLM 一看就懂
+
+- **Mailbox 文件层**(`baozicode/teams/mailbox.py`)
+  - `Mailbox.append_message` 5 步原子协议:tmp 文件 + flush + fsync +
+    `shutil.copyfileobj` 追加 + 目标 fsync + 删 tmp + release 锁
+  - `Mailbox.read_messages` skip 坏行(JSONL 部分损坏仍可读),
+    `skip_bad_lines=False` 时 raise `ValueError` 严格要求
+  - `Mailbox.read_state` 缺字段填默认(`status="offline"` /
+    `last_active_ts=None` / `current_task=None` / `backend_pid=None`),
+    0 字节 / 不存在都走默认
+  - `Mailbox.write_state` write-then-rename 原子写,无 tmp 残留
+  - `Mailbox.touch_wake` / `Mailbox.wake_initialized` / `Mailbox.wait_for_wake`
+    异步 poll `wake.signal` mtime,200ms 间隔;`timeout=30.0` 默认;
+    已有 wake.signal 不立即返回,要 mtime 变化才触发
+
+- **跨平台 lockfile**(`baozicode/teams/lockfile.py`)
+  - `mailbox_lock(path, *, timeout=5.0, stale_seconds=30.0)` context manager
+    按 `sys.platform` 分发:POSIX `fcntl.flock`(advisory)+
+    Windows `msvcrt.locking`(mandatory)
+  - 50ms 退避重试,busy 错误覆盖 `errno=11/13/33/35/158`
+    (POSIX `EAGAIN` / `EACCES` / `EDEADLK` / Windows
+    `ERROR_LOCK_VIOLATION`)
+  - 锁内容 `{pid}\n{hostname}\n{ts}\n` 写完 fsync 落盘,便于 debug
+    谁持有锁 / 锁僵了多久
+  - Stale 偷锁:mtime 超过 `stale_seconds` 的锁视为过期,下个 caller 偷
+
+- **TeamStore + Registry**(`baozicode/teams/store.py` + `registry.py`)
+  - `TeamStore.create` 原子建 team 目录 + 写 `team.json`,失败回滚删目录
+  - `TeamStore.add_member` 同步建 `<member>/` 子目录 + 4 个文件 +
+    默认 `state.json`(offline)
+  - `TeamStore.destroy(*, confirm=False)` 默认拒,需 CLI 显式 `--yes`
+  - `TeamsRegistry.bootstrap(config)` 从 `TeamsConfig.dir` 建索引,
+    `mkdir(parents=True, exist_ok=True)` 首次启动零手动干预
+  - `list_teams` 字典序(跟 `ls` 一致)+ 跳过无 `team.json` 的目录
+  - `get(name) -> TeamStore | None`(不抛);`delete_team(*, confirm)`
+
+- **CLI 子命令**(`baozicode/teams/cli.py`)
+  - `add_subcommand(subparsers)` 注册到顶层 argparse,支持
+    `baozicode team <action>` 二级结构
+  - 5 子命令:`create` / `list` / `show` / `use` / `destroy`
+  - `--teams-dir <PATH>` 全局覆盖(应急 / 测试)
+  - 退出码:0 / 1 / 2(名不合法)/ 3(not found)/ 4(IO)/ 5(config)
+  - 错误格式 `Error: <EnumClass>: <detail>` 走 stderr
+  - `destroy` 默认 stdin 确认(`[y/N]`),`--yes` 跳过,`--force` 容错
+    目录不在
+  - `main(argv=None)` 独立跑入口(`python -m baozicode.teams.cli`)
+
+- **配置 schema**(`baozicode/config/schema.py`)
+  - `TeamsConfig` Pydantic:`enabled: bool = True` +
+    `dir: Path = "~/.config/baozicode/teams/"`
+  - `AppConfig.teams: TeamsConfig | None = None`(整块省略走默认)
+  - `config.example.yaml` 加 `teams:` 完整示例(注释点明 coordinator /
+    pane_backend 留给后续 proposal)
+
+- **App 集成**(`baozicode/app.py` + `baozicode/cli.py`)
+  - `BaoZiCodeApp._build_teams_registry()` 同步构造 idempotent registry
+  - `BaoZiCodeApp.on_mount` 末尾调 `_build_teams_registry()`,
+    `self.teams` 句柄挂在 App 上
+  - `BaoZiCodeApp.on_unmount` 释放 `self.teams`(无 IO,仅丢引用)
+  - 顶层 `baozicode team ...` 子命令分发到 `teams.cli.main`
+  - `teams.enabled=False` 时 `self.teams = None`,CLI 仍可用
+
+### 测试覆盖
+
+- `tests/test_teams_v14_schema.py` — 69 tests(名字校验 / Team JSON /
+  Member / Message / BackendType)
+- `tests/test_teams_v14_lockfile.py` — 14 tests(8 平台无关 + 6 POSIX-only)
+- `tests/test_teams_v14_mailbox.py` — 23 tests(append / read / state /
+  wake / wait_for_wake)
+- `tests/test_teams_v14_store.py` — 29 tests(create / load / add_member /
+  destroy / registry)
+- `tests/test_teams_v14_cli.py` — 23 tests(5 子命令 happy / 错误退出码 /
+  destroy 确认)
+- `tests/test_teams_v14_config.py` — 12 tests(TeamsConfig 默认 /
+  AppConfig.teams 字段 / YAML 加载)
+- `tests/test_teams_v14_app.py` — 11 tests(App bootstrap / on_mount /
+  on_unmount / 顶层 CLI 分发)
+- 共 **181 tests**,全平台通过(Windows 锁 3 个 POSIX-only skipped)
+
+### 无 breaking change
+
+v1.3 项目升级 v1.4 后,主对话照常跑,SubAgent / Worktree / Hooks / Skills /
+Memory / Sessions 全不动。新增 `baozicode team <action>` CLI 子命令 +
+`teams:` 配置块(可选)。
+
+### 后续 proposal(本段**不**实现)
+
+- **v1-4-team-tools** — `team_dispatch` / `team_send_message` /
+  `team_cancel` / `team_merge` 协作工具
+- **v1-4-team-pane-backend** — tmux / iTerm2 / Windows Terminal pane
+  后端实际派生 + 唤醒
+- **v1-4-team-coordinator** — 双锁开关(配置 + 环境变量)+ 剥夺写工具
+
+详细迁移 + 配置块 + CLI 用法 + Python API + FAQ 见
+`docs/migrations/v1.3-to-v1.4.md`。
+
 ## [v1.3] — 2026-07
 
 ### 新增能力

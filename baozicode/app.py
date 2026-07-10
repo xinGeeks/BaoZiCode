@@ -36,6 +36,7 @@ from baozicode.sessions import (
     load_session as sessions_load_session,
     migrate_uuid_context_dirs,
 )
+from baozicode.teams.registry import TeamsRegistry
 from baozicode.tui.chat_screen import ChatScreen
 
 log = logging.getLogger(__name__)
@@ -137,6 +138,12 @@ class BaoZiCodeApp(App):
         self.worktree_manager: Any = None
         self.worktree_init_config: Any = None
         self.worktree_cleanup_daemon: Any = None
+
+        # ---- v1.4:Teams Registry ----
+        # 由 `_build_teams_registry` 在 on_mount 同步流程末尾构造。
+        # disabled (config.teams is None or enabled=False) 时保持 None,
+        # CLI `team` 子命令仍可工作(走 config.teams.dir bootstrap)。
+        self.teams: TeamsRegistry | None = None
 
         # ---- v0.8:SessionArchiver + sessions 列表 ----
         # sessions.bootstrap 跑过期清理、构造当前 session 的 archiver、列已有 sessions
@@ -321,6 +328,39 @@ class BaoZiCodeApp(App):
         self.worktree_cleanup_daemon = daemon
         return mgr
 
+    def _build_teams_registry(self) -> TeamsRegistry | None:
+        """v1.4 — 构造 TeamsRegistry 并挂到 `self.teams`。
+
+        Foundation 阶段唯一任务:从 `config.teams` 拿 dir,mkdir(若没有),
+        返回 registry。disabled(`config.teams is None or enabled=False`)
+        时保持 `self.teams = None`,LLM 看不到 team 工具,CLI `team` 子命
+        令仍可用(走 config fallback)。
+
+        Idempotent:若 `self.teams` 已构造过,直接返回,避免重复 mkdir。
+
+        Returns:
+            `TeamsRegistry` 实例,或 None 当 disabled
+        """
+        if self.teams is not None:
+            return self.teams
+        teams_cfg = self.config.teams
+        if teams_cfg is None or not teams_cfg.enabled:
+            self.teams = None
+            return None
+        try:
+            self.teams = TeamsRegistry.bootstrap(self.config)
+            return self.teams
+        except Exception as exc:  # noqa: BLE001
+            # mkdir 失败 / 权限错 — 静默降级,LLM 看不到 team 工具但 CLI
+            # 仍可走 user-default dir bootstrap 重试
+            log.warning(
+                "TeamsRegistry bootstrap 失败: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            self.teams = None
+            return None
+
     async def add_plugin_agents(self) -> None:
         """v1.2:MCP bootstrap 完成后调 — 拉 plugin agent 并并入 registry。"""
         if self.subagents is None:
@@ -380,6 +420,9 @@ class BaoZiCodeApp(App):
                 exclusive=True,
                 name="worktree-bootstrap",
             )
+
+        # v1.4:Team Registry bootstrap — 同步构造(无 IO 副作用,只是 mkdir + 索引)
+        self._build_teams_registry()
 
     async def _start_worktree_system(self) -> None:
         """v1.3 — 构造 WorktreeManager + InitConfig + 启动 CleanupDaemon。
@@ -545,6 +588,8 @@ class BaoZiCodeApp(App):
             except Exception:  # noqa: BLE001
                 pass
             self.worktree_manager = None
+        # v1.4:Teams Registry 释放 — TeamsRegistry 无后台线程 / daemon,仅丢引用即可
+        self.teams = None
 
     def _build_context_config(self, *, trigger: str) -> ContextConfig:
         """从 AppConfig 派生一次 ContextConfig(每次 maybe_compact 复用同一份,只在 trigger 切换时重建)。"""

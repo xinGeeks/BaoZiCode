@@ -1,0 +1,98 @@
+"""v1.4 Team Foundation — Team / Member / Message / Mailbox / Lockfile 数据层。
+
+公开 API:
+
+- `Team` / `Member` / `Message` —— frozen dataclass,持久化到
+  `<teams_dir>/<team>/team.json` 和 `<member>/{inbox,outbox}.jsonl`
+- `BackendType` —— Pydantic Literal,5 种后端(pane-tmux / pane-iterm2 /
+  pane-windows-terminal / coroutine / worktree-coroutine)
+- `MemberState` —— mailbox state.json 运行时状态(status / last_active_ts
+  / current_task / backend_pid)
+- `TeamNameValidator.validate(name)` —— 纯函数校验
+- `TeamsRegistry` —— `<teams_dir>/` 索引,扫所有 team + 唯一性约束
+- `TeamStore` —— 单个 team 的目录操作(create / load / add_member /
+  destroy)
+- `Mailbox` —— `<member>/` 目录的 JSONL 原子写 + state.json 读写 +
+  wake.signal touch
+- `mailbox_lock(path, *, timeout, stale_seconds)` —— 跨平台 lockfile
+  context manager(POSIX fcntl.flock / Windows msvcrt.locking)
+
+模块:
+
+- `schema.py` — `TeamNameValidator` + `Team` / `Member` / `Message` /
+  `MemberState` + 错误枚举
+- `mailbox.py` — `Mailbox.append_message` / `read_messages` /
+  `read_state` / `write_state` / `touch_wake` / `wait_for_wake`
+- `lockfile.py` — `mailbox_lock` + 跨平台分发
+- `store.py` — `TeamStore` 目录操作
+- `registry.py` — `TeamsRegistry` 全局索引
+- `cli.py` — `baozicode team` 子命令 argparse
+
+v1.4 explore 锁定的 12 个决策中,foundation 仅覆盖 schema / mailbox /
+lockfile / lifecycle 这一层(决策 8 / 9 / 10);其他 9 个由后续 3 个
+proposal(team-tools / team-pane-backend / team-coordinator)在此之上
+实现。
+"""
+
+from __future__ import annotations
+
+from .lockfile import MailboxLockError, MailboxLockTimeout, mailbox_lock
+from .mailbox import Direction, Mailbox
+from .registry import TeamsRegistry
+from .schema import (
+    BackendType,
+    Member,
+    MemberAlreadyExists,
+    MemberNotFound,
+    MemberState,
+    MemberStatus,
+    Message,
+    MESSAGE_SCHEMA_VERSION,
+    TEAM_SCHEMA_VERSION,
+    Team,
+    TeamAlreadyExists,
+    TeamNameBadChar,
+    TeamNameBadEnd,
+    TeamNameBadStart,
+    TeamNameDoubleHyphen,
+    TeamNameInvalid,
+    TeamNameTooLong,
+    TeamNameTooShort,
+    TeamNameValidator,
+    TeamNotFound,
+    default_member_state,
+    fill_message_timestamp,
+)
+from .store import TeamStore
+
+__all__ = [
+    "BackendType",
+    "Direction",
+    "Mailbox",
+    "MailboxLockError",
+    "MailboxLockTimeout",
+    "Member",
+    "MemberAlreadyExists",
+    "MemberNotFound",
+    "MemberState",
+    "MemberStatus",
+    "Message",
+    "MESSAGE_SCHEMA_VERSION",
+    "TEAM_SCHEMA_VERSION",
+    "Team",
+    "TeamAlreadyExists",
+    "TeamNameBadChar",
+    "TeamNameBadEnd",
+    "TeamNameBadStart",
+    "TeamNameDoubleHyphen",
+    "TeamNameInvalid",
+    "TeamNameTooLong",
+    "TeamNameTooShort",
+    "TeamNameValidator",
+    "TeamNotFound",
+    "TeamStore",
+    "TeamsRegistry",
+    "default_member_state",
+    "fill_message_timestamp",
+    "mailbox_lock",
+]

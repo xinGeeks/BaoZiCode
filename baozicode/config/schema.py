@@ -25,6 +25,8 @@ __all__ = [
     "SessionConfig",
     "SkillsConfig",
     "SubAgentsConfig",
+    "TeamsConfig",
+    "WorktreeConfig",
 ]
 
 
@@ -312,6 +314,30 @@ class WorktreeConfig(BaseModel):
     daemon_interval_seconds: int = Field(default=60, ge=5, le=3600)
 
 
+class TeamsConfig(BaseModel):
+    """v1.4 Team Foundation — Team 系统配置。
+
+    全部字段可选:整块省略 → 全默认(`~/.config/baozicode/teams/` +
+    系统全开)。
+    - `enabled` 总开关(False → App 不构造 TeamsRegistry,CLI `team`
+      子命令仍可用 — 但仅 user-default dir)
+    - `dir` teams 持久化根目录(支持 `~` 展开)
+
+    后续 proposal 会扩展:
+    - v1-4-team-pane-backend:`pane_backend` 偏好顺序
+    - v1-4-team-coordinator:`coordinator_enabled` / `coordinator_env_var` /
+      `coordinator_allowed_tools`
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="Team 系统总开关")
+    dir: Path = Field(
+        default_factory=lambda: Path("~/.config/baozicode/teams/").expanduser(),
+        description="team 持久化根目录;支持 ~ 展开",
+    )
+
+
 class AgentConfig(BaseModel):
     """v0.3 引入 — Agent 主循环参数 + v0.4 规则与提醒节奏。
 
@@ -463,6 +489,9 @@ class AppConfig(BaseModel):
     # v1.2:SubAgent 系统配置(可选;None 时整层 SubAgent 系统关闭,
     # App 不构造 SubAgentManager,TASK_TOOL 不注册)
     subagents: "SubAgentsConfig | None" = None
+    # v1.4:Team 系统配置(可选;None 时整层 Team 系统关闭,
+    # App 不构造 TeamsRegistry,`baozicode team` CLI 仍可用 — 走 user-default dir)
+    teams: "TeamsConfig | None" = None
 
     def active(self) -> BackendConfig:
         """返回当前激活后端的配置。"""

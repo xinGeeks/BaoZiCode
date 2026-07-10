@@ -491,3 +491,15 @@ subagents:
   #   retention_minutes: 30
   #   daemon_interval_seconds: 60
 
+# ─────────────────────────────────────────────────────────────────────
+# v1.4 teams — Team lifecycle 的配置
+# 不写本块则走默认:enabled=true, dir=~/.config/baozicode/teams/
+# Foundation 阶段只暴露 enabled / dir 两个字段;coordinator / pane_backend
+# 留给后续 v1-4-team-pane-backend / v1-4-team-coordinator proposal。
+# ─────────────────────────────────────────────────────────────────────
+teams:
+  enabled: true
+  # team 持久化根目录;支持 ~ 展开。Foundation 阶段所有 teams 都放这里
+  # (后续 coordinator proposal 才会引入 project-scope 子目录区分)。
+  dir: ~/.config/baozicode/teams/
+
