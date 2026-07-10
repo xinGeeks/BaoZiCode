@@ -1372,6 +1372,12 @@ class ChatScreen(Screen):
             bar = self.query_one("#status-bar", StatusBar)
         except Exception:
             return
+        # v1.3:空闲时折叠 StatusBar(height 0 + display:none),把 1 行还给 chat-scroll
+        # 阅读历史;Agent 运行中恢复 1 行进度条。toggle -idle class。
+        if idle:
+            bar.add_class("-idle")
+        else:
+            bar.remove_class("-idle")
         backend = app.config.backend
         model = app.config.active().model
         # v0.9:mode marker — [PLAN] 优先,然后 permission mode

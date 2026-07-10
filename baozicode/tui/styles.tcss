@@ -25,13 +25,13 @@ Screen {
    v0.3:StatusBar 也占底部 1 行,与 Input 一起占底部 4 行。
    把 StatusBar 放在 DOM 里位于 Scroll 与 Input 中间即可,无需 dock。
 
-   v1.3 调整:Input 收成 height 1 + 单上边框,tall 边框 + 3 行高 → 1 行,
-   把 2 行还给 #chat-scroll;StatusBar 内容简短,1 行够用。 */
+   v1.3 调整:StatusBar 改成「运行中显示 / 空闲隐藏」(通过 -idle class
+   toggle height 1 ↔ 0)。空闲时给 #chat-scroll 多 1 行用于阅读历史。 */
 #input {
     dock: bottom;
     width: 100%;
-    height: 1;
-    border-top: solid $secondary;
+    height: 3;
+    border: tall $secondary;
     padding: 0 1;
 }
 
@@ -41,6 +41,12 @@ StatusBar {
     padding: 0 1;
     background: $panel;
     color: $text-muted;
+}
+/* v1.3:空闲时折叠 StatusBar(高度 0),把 1 行还给 #chat-scroll 阅读历史。
+   Agent 运行中再加 -visible class 恢复 1 行。 */
+StatusBar.-idle {
+    height: 0;
+    display: none;
 }
 
 .user-message {
