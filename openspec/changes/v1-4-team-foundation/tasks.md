@@ -167,8 +167,9 @@
 
 ## 11. Review + Release
 
-- [ ] 11.1 全量 `pytest tests/ -v` 通过(~1500+ 个)
-- [ ] 11.2 全量 OpenSpec 校验通过
+- [x] 11.1 全量 `pytest tests/ -v` 通过(~1500+ 个) — 1503 passed, 3 skipped
+- [x] 11.2 全量 OpenSpec 校验通过
       (`openspec validate v1-4-team-foundation`)
-- [ ] 11.3 CHANGELOG + CLAUDE.md + README + config.example.yaml 同步
-- [ ] 11.4 `git commit -m "feat(v1.4-foundation): team data layer + mailbox + lockfile + CLI"`
+- [x] 11.3 CHANGELOG + CLAUDE.md + README + config.example.yaml 同步
+- [x] 11.4 `git commit -m "feat(v1.4-foundation): team data layer + mailbox + lockfile + CLI"`
+      — `c301106` (32 files, +6520/-4)
