@@ -232,6 +232,7 @@ class SubAgentsConfig(BaseModel):
     - 三个 dir 字段覆盖默认三级目录;None 时走 `baozicode/agents/_defaults`
     - `plugins_enabled` 关掉 MCP plugin 拉取
     - `task_retention_minutes` terminal 状态保留时间
+    - `worktree` v1.3:worktree 隔离子配置;None → worktree 系统不启用
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -259,6 +260,56 @@ class SubAgentsConfig(BaseModel):
     )
     plugins_enabled: bool = Field(default=True)
     task_retention_minutes: int = Field(default=5, ge=1, le=60)
+    worktree: "WorktreeConfig | None" = Field(
+        default=None,
+        description=(
+            "v1.3 — worktree 隔离子配置。None → 系统不启用 worktree"
+            "(`isolation: worktree` 角色 spawn 时报错)"
+        ),
+    )
+
+
+class WorktreeConfig(BaseModel):
+    """v1.3 Worktree Isolation — worktree 隔离配置。
+
+    全部字段可选:整块省略 → 全默认(`.worktrees/` + link/copy 默认白名单)。
+    - `enabled` 总开关(False → WorktreeManager 不构造)
+    - `link_paths` Initializer step 1 软链白名单
+    - `copy_paths` Initializer step 2 复制白名单
+    - `hooks_relpath` Initializer step 3 hooks 共享目录相对路径
+    - `gitignore_pattern` Initializer step 4 .gitignore 匹配正则
+    - `max_concurrent` WorktreeManager 同时活跃数上限
+    - `retention_minutes` CleanupDaemon 「长时间未动」阈值
+    - `daemon_interval_seconds` CleanupDaemon 扫描间隔
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=True, description="worktree 系统总开关")
+    link_paths: list[str] = Field(
+        default_factory=lambda: [".venv", "node_modules", ".cargo"],
+        description="Initializer 软链白名单(LLM 不可 override)",
+    )
+    copy_paths: list[str] = Field(
+        default_factory=lambda: [
+            ".baozicode/BaoZiCode.md",
+            ".env",
+            "config.yaml",
+            ".claude/",
+        ],
+        description="Initializer 复制白名单(LLM 不可 override)",
+    )
+    hooks_relpath: str = Field(
+        default="../_hooks/",
+        description="worktree 内 git hooks 路径(相对 worktree)",
+    )
+    gitignore_pattern: str = Field(
+        default=r"^\.worktrees/?$",
+        description="setup_dir 的 .gitignore 匹配正则(幂等跳过)",
+    )
+    max_concurrent: int = Field(default=5, ge=1, le=20)
+    retention_minutes: int = Field(default=30, ge=1, le=1440)
+    daemon_interval_seconds: int = Field(default=60, ge=5, le=3600)
 
 
 class AgentConfig(BaseModel):
@@ -462,6 +513,8 @@ __all__ = [
     "RulesConfig",
     "SessionConfig",
     "SkillsConfig",
+    "SubAgentsConfig",
+    "WorktreeConfig",
 ]
 
 

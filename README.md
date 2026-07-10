@@ -53,8 +53,42 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   2 个内置样板:`explorer`(Read/Grep/Glob/WebFetch)/ `summarizer`(Read/Grep/Glob + haiku)
   。**Breaking**:v1.0 旧 `SkillExecutor.independent_runner` 注入路径删除,独立模式
   重走 SubAgent 通道
+- 🌲 **Worktree 隔离（v1.3 新增，可选）** — sub-Agent role frontmatter 加
+  `isolation: worktree`,让该 sub-Agent 在独立 git worktree 里跑,与主 Agent /
+  其它 sub-Agent 的文件改动互不打扰。用 git 原生多工作树(共享版本库 + 各自分支),
+  目录固定 `.worktrees/<name>/`(自动 `.gitignore`);创建含 fast-path 恢复、
+  Initializer 4 步初始化(链依赖 / 复制配置 / 配 hooks / 补 gitignore);Bash 工具
+  显式注入 `cwd` 参数(不 chdir);退出变更保护(未提交 / 未推送默认拒删),
+  CleanupDaemon 三层过滤后台清理。默认关闭,零行为变化
 
-## 当前版本：v1.2
+## 当前版本：v1.3
+
+- ✅ **Worktree 隔离(v1.3 新增 — 主特性)** — `baozicode/worktree/`
+  - sub-Agent role frontmatter 加 `isolation: worktree` → 该 sub-Agent 在独立
+    git worktree(`.worktrees/<name>/`)里跑;不写 / `null` → 走 v1.2 老路径
+    (共享主 project_root)。默认关闭,需 `subagents.worktree.enabled: true`
+    + project_root 是 git repo
+  - **目录名安全校验**:限字符集 + 长度、拒 `.` / `..` 段、允许斜杠做嵌套
+    (`phase1/api-designer` → `.worktrees/phase1/api-designer/`),防 LLM 输入触发
+    路径遍历
+  - **完整生命周期**:创建(含 fast-path 恢复 —— 目录已存在只读文件系统不调 git)/
+    进入 / 退出 / 删除;`WorktreeManager` 编排,`git worktree add -b wt/<name>`
+  - **环境初始化**(Initializer 4 步):软链大依赖(`.venv` / `node_modules`)、
+    复制本地配置(`.env` / `BaoZiCode.md`)、配子目录 git hooks、追加 `.worktrees/`
+    到 `.gitignore`
+  - **显式 cwd 而非 chdir**:Bash 工具加 `cwd` optional 参数,SubAgentManager 自动
+    注入(LLM 不感知);所有路径相关缓存用绝对路径 key,天然按目录隔离,不需切换清缓存
+  - **退出变更保护**:exit 决策树 —— 全干净 → 删 / 有未提交或未推送 commit → 留
+    detached(TUI 卡片显 `worktree: detached`);`canceled` → force 删
+  - **后台清理**:`CleanupDaemon`(默认 60s 一次)三层过滤(task 活跃 → 时间 →
+    干净度)扫过期 worktree 强清,任意一层不过就 skip
+  - **cache 取舍**:主 Agent prompt byte-identical → Anthropic cache 命中零变化;
+    worktree sub-Agent 因 `cwd` 段不同 → 首次 LLM 请求 cache miss(不引入第二份缓存)
+  - **Bash `cwd` 向后兼容**:不传 `cwd` → 走 v1.2 老路径;传 `cwd=<abs>` →
+    fire-and-forget(执行完不更 session.cwd);非法 cwd(相对 / 不存在 / 非目录 /
+    有效 root 外)→ reject 不执行
+  - 详细迁移 + 配置块 + frontmatter 示例 + exit 决策表 + 故障排查见
+    `docs/migrations/v1.2-to-v1.3.md`
 
 - ✅ **Hooks 生命周期(v1.1 新增,v1.2 polish)** — `baozicode/hooks/`
   - 在 Agent 关键节点(session / turn / message / tool / system 共 11 个
@@ -525,6 +559,40 @@ async def read_resource(uri: str) -> dict:
 ```
 
 降级:server 端异常 → 跳过该 server;agent 详情拉取失败 → 跳过该 agent。
+
+### Worktree 隔离(v1.3,可选)
+
+sub-Agent role 的 frontmatter 加 `isolation: worktree`,即可让该 sub-Agent 在
+**独立的 git worktree** 里跑 —— 与主 Agent、其它 sub-Agent 的文件改动互不打扰。
+默认不启用(需 `config.yaml` 配 `subagents.worktree.enabled: true` + project_root 是 git repo)。
+
+```yaml
+---
+name: phase1/api-designer      # 嵌套命名 → .worktrees/phase1/api-designer/
+description: 设计阶段 1 的后端 API 契约
+isolation: worktree
+allowed-tools: [Read, Grep, Glob, Write, Edit]
+---
+你负责 phase1 的 API 契约设计...
+```
+
+隔离行为:
+
+- 派发时 `WorktreeManager` 自动 `git worktree add -b wt/<name>`(目录已存在则走
+  fast-path,只读文件系统不调 git)
+- Initializer 跑 4 步:软链大依赖(`.venv` / `node_modules`)、复制本地配置
+  (`.env` / `BaoZiCode.md`)、配子目录 git hooks、追加 `.worktrees/` 到 `.gitignore`
+- Bash 工具由 SubAgentManager 自动注入 `cwd=<worktree_path>`(LLM 不感知)
+- 完事按 exit 决策树:全干净 → 删 / 有未提交或未推送 → 留 detached(TUI 卡片显
+  `worktree: detached`)
+- `CleanupDaemon` 后台三层过滤(task 活跃 → 时间 → 干净度)扫过期 worktree 强清
+
+cache 取舍:主 Agent 的 prompt byte-identical → Anthropic cache 命中零变化;
+worktree sub-Agent 因 `cwd` 段不同 → 首次 LLM 请求 cache miss(不引入第二份缓存)。
+
+---
+
+详细:[docs/migrations/v1.2-to-v1.3.md](./docs/migrations/v1.2-to-v1.3.md)
 
 ---
 

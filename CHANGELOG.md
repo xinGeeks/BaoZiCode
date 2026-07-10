@@ -2,6 +2,48 @@
 
 BaoZiCode 所有重要变更记录在此。版本号遵循 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。
 
+## [v1.3] — 2026-07
+
+### 新增能力
+
+- **Worktree 隔离**(`baozicode/worktree/`)
+  - sub-Agent role frontmatter 加 `isolation: worktree` → 该 sub-Agent 在独立
+    git worktree(`.worktrees/<name>/`)里跑,与主 Agent / 其它 sub-Agent 的
+    文件改动互不打扰;用 git 原生多工作树(共享版本库 + 各自分支 `wt/<name>`)
+  - **目录名安全校验**:限字符集 + 长度、拒 `.` / `..` 段、允许斜杠做嵌套
+    (`phase1/api-designer` → `.worktrees/phase1/api-designer/`),防路径遍历
+  - **完整生命周期**:创建(含 fast-path 恢复 —— 目录已存在只读文件系统不调
+    git)/ 进入 / 退出 / 删除,`WorktreeManager` 编排
+  - **环境初始化**(Initializer 4 步):软链大依赖(`.venv` / `node_modules`)、
+    复制本地配置(`.env` / `BaoZiCode.md`)、配子目录 git hooks
+    (`core.hooksPath`)、追加 `.worktrees/` 到 `.gitignore`
+  - **显式 cwd 而非 chdir**:Bash 工具加 `cwd` optional 参数,SubAgentManager
+    自动注入(LLM 不感知);所有路径相关缓存(文件内容 / 系统提示词 / 项目指令 /
+    记忆)用绝对路径 key,天然按目录隔离,不需切换清缓存
+  - **退出变更保护**:exit 决策树 —— 全干净 → 删 / 有未提交或未推送 commit →
+    留 detached(TUI `SubAgentCard` 显 `worktree: detached`);`canceled` → force 删
+  - **后台清理**:`CleanupDaemon`(默认 60s 一次)三层过滤(task 活跃 → 时间 →
+    干净度)扫过期 worktree 强清,任意一层不过就 skip
+  - **配置**:`config.yaml` 的 `subagents.worktree` 块(`enabled` / `link_paths` /
+    `copy_paths` / `max_concurrent` / `retention_minutes` /
+    `daemon_interval_seconds`);默认 `enabled: false`,零行为变化
+  - **App 装配**:`_build_worktree_manager`(worktree enabled + git repo 才构造)+
+    on_mount worker 起 daemon + on_unmount 强清所有 worktree
+
+### 兼容性
+
+- 默认不启用(`worktree.enabled: false`)→ 走 v1.2 老路径,byte-identical
+- role frontmatter 不写 `isolation`(或 `null`)→ sub-Agent 共享主 project_root
+- Bash 不传 `cwd` → v1.2 老路径(`plan_cd` + commit session.cwd,完全等价);
+  传 `cwd=<abs>` → fire-and-forget(执行完不更 session.cwd)
+- project_root 非 git repo → WorktreeManager 构造失败 → 系统静默不启用(banner 警告)
+- **cache 取舍**:主 Agent prompt byte-identical → Anthropic cache 命中零变化;
+  worktree sub-Agent 因 `cwd` 段不同 → 首次 LLM 请求 cache miss(不引入第二份缓存)
+
+### 迁移
+
+- 详见 `docs/migrations/v1.2-to-v1.3.md`
+
 ## [v1.1] — 2026-07
 
 ### 新增能力

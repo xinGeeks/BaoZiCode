@@ -24,6 +24,7 @@ import asyncio
 import os
 import re
 from pathlib import Path
+from typing import Callable
 
 from baozicode.tools.base import ToolDefinition, ToolResult, decode_subprocess_output
 
@@ -52,6 +53,16 @@ TOOL = ToolDefinition(
                 "description": (
                     f"Optional timeout in seconds "
                     f"(default {DEFAULT_TIMEOUT_SECONDS}, max {MAX_TIMEOUT_SECONDS})."
+                ),
+            },
+            "cwd": {
+                "type": "string",
+                "description": (
+                    "v1.3 — Optional absolute path overriding cwd for this "
+                    "single call. When set, the command runs in this "
+                    "directory; `_sessions.cwd` is NOT updated (fire-and-"
+                    "forget). Used by sub-Agent worktree isolation to keep "
+                    "Bash calls in the worktree directory."
                 ),
             },
         },
@@ -119,6 +130,23 @@ class BashSession:
 
 _sessions: dict[str, BashSession] = {}
 
+# v1.3 — D11:`set_cwd_validator` 注入 closure 让 Bash.execute 在
+# 显式 cwd 模式下验证 cwd 是否合法。SubAgentManager._run_subagent 在
+# `asyncio.create_task(...)` 之前 set,任务结束 unset。Closure 通常
+# 检查 cwd 是否在 sub-Agent 的 effective_project_root(worktree) 内。
+_cwd_validator: Callable[[Path], bool] | None = None
+
+
+def set_cwd_validator(validator: Callable[[Path], bool] | None) -> None:
+    """注入 cwd 校验 closure — D11。
+
+    Args:
+        validator: 接 Path 返回 bool;`True` 表示 cwd 在某有效 root 内。
+            传 `None` 清除。
+    """
+    global _cwd_validator
+    _cwd_validator = validator
+
 
 def configure(project_root: str | Path) -> BashSession:
     """初始化或重置 project_root 的会话。App 启动时调用一次。"""
@@ -165,19 +193,58 @@ async def execute(arguments: dict) -> ToolResult:
         timeout = DEFAULT_TIMEOUT_SECONDS
     timeout = max(1, min(timeout, MAX_TIMEOUT_SECONDS))
 
-    new_cwd, plan_err = session.plan_cd(command)
-    if plan_err is not None:
-        return ToolResult.error_result(
-            "",
-            f"Bash: rejected — {plan_err}. cwd remains '{session.display_cwd()}'.",
+    # ---- v1.3 D5:显式 cwd 模式 ----
+    # 非 None → 在指定 cwd 执行;不调 plan_cd、不更 _sessions.cwd
+    # (fire-and-forget)。worktree sub-Agent 的所有 Bash 调用都走这条
+    # 路径,主 Agent 默认走 v1.2 老路径。
+    cwd_override = arguments.get("cwd")
+    if cwd_override is not None:
+        override_path = Path(cwd_override)
+        # 安全校验 1:必须绝对路径
+        if not override_path.is_absolute():
+            return ToolResult.error_result(
+                "",
+                f"Bash: cwd 必须是绝对路径,得到 {cwd_override!r}",
+            )
+        # 安全校验 2:必须存在且是目录
+        if not override_path.exists():
+            return ToolResult.error_result(
+                "", f"Bash: cwd 不存在: {cwd_override}",
+            )
+        if not override_path.is_dir():
+            return ToolResult.error_result(
+                "", f"Bash: cwd 不是目录: {cwd_override}",
+            )
+        # 强制 resolve 防 symlink 逃逸
+        resolved = override_path.resolve()
+        # 安全校验 3:必须在某有效 root 内(主 project_root 或
+        # 注入的 cwd_validator 接受的 root —— D11)
+        inside_main = session._is_inside(resolved)
+        inside_extra = (
+            _cwd_validator is not None and _cwd_validator(resolved)
         )
+        if not inside_main and not inside_extra:
+            return ToolResult.error_result(
+                "",
+                f"Bash: cwd {cwd_override} 不在任何有效 root 内",
+            )
+        subprocess_cwd = str(resolved)
+    else:
+        new_cwd, plan_err = session.plan_cd(command)
+        if plan_err is not None:
+            return ToolResult.error_result(
+                "",
+                f"Bash: rejected — {plan_err}. "
+                f"cwd remains '{session.display_cwd()}'.",
+            )
+        subprocess_cwd = str(new_cwd)
 
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(new_cwd),
+            cwd=subprocess_cwd,
         )
     except OSError as exc:
         return ToolResult.error_result("", f"Bash: failed to spawn: {exc}")
@@ -197,8 +264,9 @@ async def execute(arguments: dict) -> ToolResult:
             f"Bash: timed out after {timeout}s",
         )
 
-    # cwd 已验证过才提交
-    session.cwd = new_cwd
+    # cwd 已验证过才提交 — 只在老路径(无 cwd_override)commit session.cwd
+    if cwd_override is None:
+        session.cwd = new_cwd
 
     stdout = decode_subprocess_output(stdout_b).rstrip()
     stderr = decode_subprocess_output(stderr_b).rstrip()
@@ -221,4 +289,11 @@ async def execute(arguments: dict) -> ToolResult:
     return ToolResult.success("", output)
 
 
-__all__ = ["BashSession", "TOOL", "configure", "execute", "get_session"]
+__all__ = [
+    "BashSession",
+    "TOOL",
+    "configure",
+    "execute",
+    "get_session",
+    "set_cwd_validator",
+]

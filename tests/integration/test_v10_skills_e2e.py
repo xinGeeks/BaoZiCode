@@ -272,7 +272,7 @@ async def test_independent_skill_with_runner_returns_summary(app: BaoZiCodeApp) 
             self._next_id = 0
             self._tasks: dict = {}
 
-        def dispatch(self, *, type, role, prompt, async_=True):  # noqa: A002
+        async def dispatch(self, *, type, role, prompt, async_=True):  # noqa: A002
             self._next_id += 1
             tid = f"stub-{self._next_id}"
             self._tasks[tid] = _StubTask()

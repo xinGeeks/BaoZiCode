@@ -755,34 +755,34 @@ class TestSubAgentManager:
         assert m.list_tasks() == []
         assert m.count_by_state() == {}
 
-    def test_dispatch_unknown_role_returns_toolresult_error(self) -> None:
+    async def test_dispatch_unknown_role_returns_toolresult_error(self) -> None:
         m = self._build_manager()
-        result = m.dispatch(
+        result = await m.dispatch(
             type="definition", role="nonexistent", prompt="x", async_=True,
         )
         assert isinstance(result, ToolResult)
         assert result.is_error
         assert "未知 Agent role" in result.content
 
-    def test_dispatch_max_concurrent_returns_error(self) -> None:
+    async def test_dispatch_max_concurrent_returns_error(self) -> None:
         m = self._build_manager(max_concurrent=1)
         # 直接塞一个 running task(不走真 spawn)
         t = TaskInfo(task_id="t-1", type="definition", role="explorer", prompt="x")
         t.state = "running"
         m._tasks["t-1"] = t
         # 再派一个 — 超限
-        result = m.dispatch(
+        result = await m.dispatch(
             type="definition", role="explorer", prompt="y", async_=True,
         )
         assert isinstance(result, ToolResult)
         assert result.is_error
         assert "并发上限" in result.content
 
-    def test_dispatch_fork_forces_async(self) -> None:
+    async def test_dispatch_fork_forces_async(self) -> None:
         """fork + async=False → 自动转 async(D8)。"""
         m = self._build_manager()
         # fork 模式 + 无 parent_agent → ValueError(manager 包装成 ToolResult)
-        result = m.dispatch(
+        result = await m.dispatch(
             type="fork", role=None, prompt="x", async_=False,
             parent_conversation=None, parent_denied_counts=None,
             parent_agent=None,
@@ -862,7 +862,7 @@ class TestSubAgentManager:
         counts = m.count_by_state()
         assert counts == {"running": 2, "done": 1, "failed": 1}
 
-    def test_tool_filter_empty_returns_error(self) -> None:
+    async def test_tool_filter_empty_returns_error(self) -> None:
         """role.tools 与 background_whitelist 交集空 → ToolFilterEmptyError
         → ToolResult(is_error=True)"""
         from pathlib import Path as _P
@@ -896,7 +896,7 @@ class TestSubAgentManager:
         manager = SubAgentManager(
             runtime=runtime, main_conversation=ConversationManager(),
         )
-        result = manager.dispatch(
+        result = await manager.dispatch(
             type="definition", role="bad", prompt="x", async_=True,
         )
         assert isinstance(result, ToolResult)
@@ -925,6 +925,8 @@ class TestSubAgentCardWidget:
         type: str = "definition",  # noqa: A002
         state: str = "running",
         last_text: str = "",
+        worktree_name: str | None = None,
+        worktree_state: str | None = None,
     ) -> "TaskInfo":
         from datetime import datetime, timezone
 
@@ -937,6 +939,8 @@ class TestSubAgentCardWidget:
             state=state,  # type: ignore[arg-type]
             created_at=datetime.now(tz=timezone.utc),
             last_text=last_text,
+            worktree_name=worktree_name,
+            worktree_state=worktree_state,
         )
 
     def test_first_line_preview_short(self) -> None:
@@ -1070,6 +1074,99 @@ class TestSubAgentCardWidget:
                     )
                 )
                 assert card.has_class("-failed") is True
+
+        import asyncio
+        asyncio.run(_run())
+
+    # ---- v1.3:worktree 模式卡片渲染 ----
+
+    def test_collapsed_no_worktree_no_cwd_line(self) -> None:
+        """v1.3 — 无 worktree 的 task 卡片不显示 cwd 行(等价 v1.2 行为)。"""
+        from textual.app import App
+
+        from baozicode.tui.subagent_card import SubAgentCard
+
+        async def _run() -> None:
+            a = App()
+            async with a.run_test() as pilot:
+                card = SubAgentCard(
+                    task_id="t5",
+                    role_label="reviewer",
+                    type_label="definition",
+                )
+                await pilot.app.mount(card)
+                card.update_from_task(
+                    self._make_task(
+                        task_id="t5",
+                        worktree_name=None,
+                        worktree_state=None,
+                    )
+                )
+                rendered = card.render()
+                assert "cwd:" not in str(rendered)
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_collapsed_worktree_shows_cwd_line(self) -> None:
+        """v1.3 — 有 worktree_name 的 task 折叠卡片显示 cwd 行。"""
+        from textual.app import App
+
+        from baozicode.tui.subagent_card import SubAgentCard
+
+        async def _run() -> None:
+            a = App()
+            async with a.run_test() as pilot:
+                card = SubAgentCard(
+                    task_id="t6",
+                    role_label="api-designer",
+                    type_label="definition",
+                )
+                await pilot.app.mount(card)
+                card.update_from_task(
+                    self._make_task(
+                        task_id="t6",
+                        worktree_name="api-designer",
+                        worktree_state="active",
+                    )
+                )
+                rendered = str(card.render())
+                assert "cwd:" in rendered
+                assert ".worktrees/api-designer/" in rendered
+                assert "worktree: active" in rendered
+
+        import asyncio
+        asyncio.run(_run())
+
+    def test_expanded_worktree_includes_cwd_line(self) -> None:
+        """v1.3 — 展开卡片在 last_text 之前显示 cwd 行。"""
+        from textual.app import App
+
+        from baozicode.tui.subagent_card import SubAgentCard
+
+        async def _run() -> None:
+            a = App()
+            async with a.run_test() as pilot:
+                card = SubAgentCard(
+                    task_id="t7",
+                    role_label="phase1/api-designer",
+                    type_label="definition",
+                )
+                await pilot.app.mount(card)
+                card.update_from_task(
+                    self._make_task(
+                        task_id="t7",
+                        last_text="设计完成",
+                        worktree_name="phase1/api-designer",
+                        worktree_state="detached",
+                    )
+                )
+                card.toggle_expanded()  # 切到展开
+                rendered = str(card.render())
+                assert "cwd:" in rendered
+                assert ".worktrees/phase1/api-designer/" in rendered
+                assert "worktree: detached" in rendered
+                assert "设计完成" in rendered
 
         import asyncio
         asyncio.run(_run())

@@ -174,7 +174,7 @@ class SkillExecutor:
             self._subagent_manager._runtime._registry._defs[name] = agent_def
 
             # 派发 async + 等完成(用 sync timeout 短一点,默认 120s)
-            raw = self._subagent_manager.dispatch(
+            raw = await self._subagent_manager.dispatch(
                 type="definition",
                 role=name,
                 prompt=skill_body or f"按 Skill {name!r} 执行任务",

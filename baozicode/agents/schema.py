@@ -36,13 +36,16 @@ MAX_NESTING_DEPTH = 3
 # max-iterations 上限(防 LLM 死循环)
 MAX_ITERATIONS = 100
 
+# v1.3 isolation 取值字面量
+AgentIsolation = Literal["worktree"]
+
 
 class AgentFrontmatter(BaseModel):
     """YAML frontmatter 的强校验 Pydantic 模型。
 
     必填: name, description
     可选: tools / tools-deny / model / max-iterations / permission-mode /
-          nesting-depth / hidden
+          nesting-depth / hidden / **isolation** (v1.3)
 
     字段命名:
     - Python 用下划线(YAML kebab-case 优先,`populate_by_name=True` 兜底)
@@ -64,6 +67,9 @@ class AgentFrontmatter(BaseModel):
     )  # None = inherit(用主 Agent 的 mode)
     nesting_depth: int = Field(default=0, alias="nesting-depth")
     hidden: bool = False
+    # v1.3:worktree 物理隔离模式;None = 不隔离(v1.2 行为);`"worktree"`
+    # = spawn 时自动建 git worktree(`SubAgentRuntime` 接管)
+    isolation: AgentIsolation | None = None
 
     @field_validator("name")
     @classmethod
@@ -244,6 +250,7 @@ def _simplify_validation_error(msg: str) -> str:
 __all__ = [
     "AgentDef",
     "AgentFrontmatter",
+    "AgentIsolation",
     "AgentModel",
     "AgentPermissionMode",
     "MAX_ITERATIONS",

@@ -82,7 +82,7 @@ class _StubSubAgentManager:
         self._error = error
         self.dispatched: list[dict[str, Any]] = []
 
-    def dispatch(  # noqa: A002
+    async def dispatch(  # noqa: A002
         self,
         *,
         type: str,  # noqa: A002

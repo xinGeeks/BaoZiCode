@@ -467,3 +467,27 @@ subagents:
   # user_dir: null
   # project_dir: null
 
+  # ───────────────────────────────────────────────────────────────────
+  # v1.3 worktree — 子 Agent isolation: worktree 隔离配置
+  # 不写本块 → worktree 系统不启用(isolation: worktree 角色 spawn 报错)
+  # ───────────────────────────────────────────────────────────────────
+  # worktree:
+  #   enabled: true
+  #   # Initializer 4 步白名单(LLM 不可 override)
+  #   link_paths:
+  #     - .venv
+  #     - node_modules
+  #     - .cargo
+  #   copy_paths:
+  #     - .baozicode/BaoZiCode.md
+  #     - .env
+  #     - config.yaml
+  #     - .claude/
+  #   hooks_relpath: ../_hooks/
+  #   gitignore_pattern: '^\.worktrees/?$'
+  #   # WorktreeManager 资源限制
+  #   max_concurrent: 5
+  #   # CleanupDaemon 后台清理阈值
+  #   retention_minutes: 30
+  #   daemon_interval_seconds: 60
+

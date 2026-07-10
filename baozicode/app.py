@@ -130,6 +130,14 @@ class BaoZiCodeApp(App):
         # 如果 caller(CLI)已 bootstrap,直接接过来;否则由 on_mount worker 异步 bootstrap
         self.mcp_manager: McpClientManager | None = mcp_manager
 
+        # ---- v1.3:Worktree Manager + Cleanup Daemon ----
+        # 由 `_build_worktree_manager` 在 on_mount 后构造,sub-Agent
+        # `isolation: worktree` 用。Cleanup Daemon 后台跑,App 关闭时
+        # stop + 强制 remove_all。
+        self.worktree_manager: Any = None
+        self.worktree_init_config: Any = None
+        self.worktree_cleanup_daemon: Any = None
+
         # ---- v0.8:SessionArchiver + sessions 列表 ----
         # sessions.bootstrap 跑过期清理、构造当前 session 的 archiver、列已有 sessions
         archiver, sessions_meta = sessions_bootstrap(
@@ -247,6 +255,11 @@ class BaoZiCodeApp(App):
             project_root=self.project_root,
             config=config,
             registry=reg,
+            # v1.3 — 注入 worktree 隔离设施。`enabled=False` 时
+            # worktree_manager / worktree_init_config 都是 None →
+            # `isolation: worktree` 角色 spawn 时 ValueError 拒。
+            worktree_manager=self.worktree_manager,
+            worktree_init_config=self.worktree_init_config,
         )
         manager = SubAgentManager(
             runtime=runtime,
@@ -254,8 +267,59 @@ class BaoZiCodeApp(App):
             max_concurrent=sa_cfg.max_concurrent if sa_cfg else 5,
             task_retention_minutes=sa_cfg.task_retention_minutes if sa_cfg else 5,
             main_agent_ref=lambda: self._current_agent,
+            # v1.3 — 注入给 `_handle_worktree_exit` 用
+            worktree_manager=self.worktree_manager,
         )
         return manager
+
+    def _build_worktree_manager(self) -> Any:
+        """v1.3 — 构造 WorktreeManager + WorktreeInitConfig + CleanupDaemon。
+
+        仅当 `config.subagents.worktree` 显式 enabled 才构造;否则 3 个
+        属性都置 None,sub-Agent `isolation: worktree` 角色会因
+        SubAgentRuntime 未注入 WorktreeManager 而 ValueError 拒。
+        """
+        from baozicode.worktree import (
+            WorktreeInitConfig,
+            WorktreeManager,
+            WorktreeCleanupDaemon,
+        )
+
+        sa_cfg = self.config.subagents
+        wt_cfg = sa_cfg.worktree if sa_cfg else None
+        if wt_cfg is None or not wt_cfg.enabled:
+            return None
+        # 构造 WorktreeManager — 校验 setup_dir 是 git repo,否则抛
+        try:
+            mgr = WorktreeManager(
+                setup_dir=self.project_root,
+                max_concurrent=wt_cfg.max_concurrent,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "WorktreeManager 构造失败 (project_root 不是 git repo?): %s: %s",
+                type(exc).__name__, exc,
+            )
+            return None
+        init_cfg = WorktreeInitConfig(
+            link_paths=list(wt_cfg.link_paths),
+            copy_paths=list(wt_cfg.copy_paths),
+            hooks_relpath=wt_cfg.hooks_relpath,
+            gitignore_pattern=wt_cfg.gitignore_pattern,
+        )
+        self.worktree_manager = mgr
+        self.worktree_init_config = init_cfg
+        # 构造但不启动 daemon —— 启动留给 on_mount async worker
+        daemon = WorktreeCleanupDaemon(
+            manager=mgr,
+            # subagent_manager 是 SubAgentManager 实例,实现了
+            # TaskActiveProbe(daemon 用它判断 task 是否活跃)
+            task_probe=self.subagents,
+            retention_minutes=wt_cfg.retention_minutes,
+            interval_seconds=float(wt_cfg.daemon_interval_seconds),
+        )
+        self.worktree_cleanup_daemon = daemon
+        return mgr
 
     async def add_plugin_agents(self) -> None:
         """v1.2:MCP bootstrap 完成后调 — 拉 plugin agent 并并入 registry。"""
@@ -302,6 +366,37 @@ class BaoZiCodeApp(App):
                 self._register_task_tool(),
                 exclusive=True,
                 name="subagent-task-tool-register",
+            )
+        # v1.3:Worktree 系统启动 — 需要 SubAgentManager 已就绪(task_probe)
+        # 这里顺序执行(在 on_mount 同步流程的尾部,跑完前其他 worker
+        # 不会 dispatch task)。
+        if (
+            self.config.subagents is not None
+            and self.config.subagents.worktree is not None
+            and self.config.subagents.worktree.enabled
+        ):
+            self.run_worker(
+                self._start_worktree_system(),
+                exclusive=True,
+                name="worktree-bootstrap",
+            )
+
+    async def _start_worktree_system(self) -> None:
+        """v1.3 — 构造 WorktreeManager + InitConfig + 启动 CleanupDaemon。
+
+        必须在 SubAgentManager 就绪(self.subagents 不为 None)之后跑,
+        因为 CleanupDaemon 的 `task_probe` 参数 = self.subagents(task
+        active probe)。如果 project_root 不是 git repo,WorktreeManager
+        构造抛错 → log warning,worktree 系统静默不启用。
+        """
+        try:
+            self._build_worktree_manager()
+            if self.worktree_cleanup_daemon is not None:
+                await self.worktree_cleanup_daemon.start()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "worktree 系统启动失败: %s: %s",
+                type(exc).__name__, exc,
             )
 
     async def _register_task_tool(self) -> None:
@@ -419,7 +514,7 @@ class BaoZiCodeApp(App):
             self._load_skill_tool_registered = True
 
     async def on_unmount(self) -> None:
-        """App 关闭时清理 MCP 客户端 + 上下文压缩文件。"""
+        """App 关闭时清理 MCP 客户端 + 上下文压缩文件 + worktree 系统。"""
         if self.mcp_manager is not None:
             try:
                 await self.mcp_manager.shutdown()
@@ -431,6 +526,25 @@ class BaoZiCodeApp(App):
             self.context_storage.cleanup()
         except Exception:  # noqa: BLE001
             pass
+        # v1.3:worktree 系统收尾 — 停 daemon + 强制 remove_all
+        # (App 关闭时所有 worktree 都不再需要,强制清掉避免残留)
+        if self.worktree_cleanup_daemon is not None:
+            try:
+                await self.worktree_cleanup_daemon.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.worktree_cleanup_daemon = None
+        if self.worktree_manager is not None:
+            try:
+                # iter_worktrees 列出所有现存 worktree,挨个 force=True 删
+                for name, _path in self.worktree_manager.iter_worktrees():
+                    try:
+                        await self.worktree_manager.remove(name, force=True)
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001
+                pass
+            self.worktree_manager = None
 
     def _build_context_config(self, *, trigger: str) -> ContextConfig:
         """从 AppConfig 派生一次 ContextConfig(每次 maybe_compact 复用同一份,只在 trigger 切换时重建)。"""

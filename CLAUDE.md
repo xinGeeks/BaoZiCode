@@ -119,6 +119,34 @@ v0.4 旧 `skills_dir/*.md` 单文件路径全部继续工作。
 - **目录形 Skill**(推荐):`<skills_dir>/<skill-name>/SKILL.md`,整目录可作为能力包
   分发(SKILL.md 入口 + 模板/示例/脚本);`name` 必须 `^[a-z][a-z0-9-]*$`
 
+### v1.3 范围
+v1.2 SubAgent 之上加一层:**git worktree 隔离**。带 `isolation: worktree` 的
+sub-Agent 在独立工作目录里跑,主 Agent 与其它 sub-Agent 不被它的文件改动打扰。
+**默认关闭**(`subagents.worktree.enabled: false`)→ 零行为变化,走 v1.2 老路径。
+
+- **git 原生多工作树**:同仓库挂多目录、共享版本库、各自分支 `wt/<name>`;目录固定
+  `<project>/.worktrees/<name>/`,自动加到 `.gitignore`;`project_root` 必须是 git repo
+  (WorktreeManager 构造校验,否则 banner warning 静默不启用)
+- **目录名安全校验**:限字符集 + 长度、拒 `.` / `..` 段、允许斜杠做嵌套
+  (`phase1/api-designer` → `.worktrees/phase1/api-designer/`),防 LLM 输入路径遍历
+- **完整生命周期**:创建(含 fast-path 恢复 —— 目录已存在只读文件系统不调 git)/
+  进入 / 退出 / 删除
+- **Initializer 4 步**:软链大依赖(`link_paths`)、复制本地配置(`copy_paths`)、
+  设子目录 `core.hooksPath`、追加 `.worktrees/` 到 `.gitignore`
+- **显式 cwd 而非 chdir**:Bash 工具加 `cwd` optional 参数,SubAgentManager 注入
+  (LLM 不直接传);不传 → v1.2 老路径(`plan_cd` + commit session.cwd);传
+  `cwd=<abs>` → 在该目录跑,fire-and-forget(执行完不更 session.cwd);非法 cwd
+  (相对 / 不存在 / 非目录 / 有效 root 外)→ reject 不执行
+- **role frontmatter**:`isolation: worktree` 声明隔离;不写(或 `null`)→ v1.2 老路径
+  (共享主 project_root);`fork mode + isolation=worktree` 互斥(fork 强制走主 repo)
+- **退出决策树**:`done`/`failed` → `exit(force=False)`(干净删 / 有未提交或未推送留
+  detached,TUI 卡片显 `worktree: detached`);`canceled` → `force=True` 删
+- **CleanupDaemon**:后台(默认 60s)三层过滤(task 活跃 → 时间 → 干净度)扫过期
+  worktree 强清,任意一层不过就 skip
+- **cache 取舍**:主 Agent BuiltPrompt byte-identical → Anthropic cache 命中零变化;
+  worktree sub-Agent `env_info.cwd` 段不同 → 打破 byte-identical → 首次 LLM 请求
+  cache miss(不引入第二份缓存,复用主 Agent template 只改 cwd 占位符)
+
 ## 模块结构
 
 ```

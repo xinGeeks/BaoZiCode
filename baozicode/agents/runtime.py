@@ -1,8 +1,9 @@
 """v1.2 SubAgent Delegation — sub-Agent runtime(state isolation + BuiltPrompt)。
 
 公开 API:
-- `SubAgentRuntime.__init__(llm, hooks, tool_registry, project_root, config, registry)`
-- `SubAgentRuntime.spawn(*, task_id, type, role_def, prompt, parent_messages,
+- `SubAgentRuntime.__init__(llm, hooks, tool_registry, project_root, config, registry,
+                              *, worktree_manager=None, worktree_init_config=None)`
+- `async SubAgentRuntime.spawn(*, task_id, type, role_def, prompt, parent_messages,
                            parent_denied_counts, parent_agent, is_background) -> Agent`
 
 职责:
@@ -14,6 +15,8 @@
 3. fork 模式:**共享** parent._prompt 对象(byte-identical cache key)
 4. definition 模式:用 role body 作为 identity section,重建一份新的 BuiltPrompt
 5. 把 `subagent_meta` dict 注入 Agent 实例,供 `_fire_lifecycle_safe` 加 `subagent` 字段
+6. v1.3:若 `role_def.frontmatter.isolation == "worktree"`,创建独立
+   git worktree + 注入 `effective_project_root` + 设 `_worktree_state`
 
 共享(只读,sub-Agent 不会改):
 - `LLMClient` / `HookDispatcher` / `ToolRegistry` 全局 / `AppConfig`
@@ -34,6 +37,12 @@ from baozicode.prompt import PromptBuilder
 from baozicode.prompt.types import BuiltPrompt
 from baozicode.tools.base import ToolDefinition
 from baozicode.tools.registry import ToolRegistry
+from baozicode.worktree import (
+    WorktreeInitConfig,
+    WorktreeInitializer,
+    WorktreeManager,
+    WorktreeState,
+)
 
 if TYPE_CHECKING:
     from baozicode.agent import Agent
@@ -69,6 +78,8 @@ class SubAgentRuntime:
         project_root: Path,
         config: "AppConfig",
         registry: "AgentRegistry",
+        worktree_manager: WorktreeManager | None = None,
+        worktree_init_config: WorktreeInitConfig | None = None,
     ) -> None:
         self._llm = llm
         self._hooks = hooks
@@ -76,8 +87,18 @@ class SubAgentRuntime:
         self._project_root = project_root
         self._config = config
         self._registry = registry
+        # v1.3:worktree 隔离设施。两者必须**同时**提供(或同时 None)
+        # —— 否则 spawn 时若有 `isolation="worktree"` 角色,缺一个就报错
+        # (fail-fast,不半创建)。
+        if (worktree_manager is None) != (worktree_init_config is None):
+            raise ValueError(
+                "SubAgentRuntime: worktree_manager 和 worktree_init_config "
+                "必须同时提供或同时为 None"
+            )
+        self._worktree_manager = worktree_manager
+        self._worktree_init_config = worktree_init_config
 
-    def spawn(
+    async def spawn(
         self,
         *,
         task_id: str,
@@ -108,7 +129,8 @@ class SubAgentRuntime:
             构造好的 `Agent` 实例(已带 subagent_meta)
 
         Raises:
-            ValueError: type 与必填参数不匹配
+            ValueError: type 与必填参数不匹配 / fork + worktree 互斥 /
+                isolation=worktree 但 runtime 未配 worktree_manager
         """
         # ---- 参数校验 ----
         if type == "definition":
@@ -123,6 +145,42 @@ class SubAgentRuntime:
                 raise ValueError("fork 模式 parent_messages 必填")
             if parent_agent is None:
                 raise ValueError("fork 模式 parent_agent 必填(共享 _prompt)")
+
+        # ---- v1.3:worktree 隔离处理 ----
+        # 必须在 spawn 早期;fork + worktree 互斥(D4)→ fail-fast,
+        # **不**半创建 worktree。
+        worktree_state: WorktreeState | None = None
+        worktree_name: str | None = None
+        effective_project_root = self._project_root
+        if role_def is not None:
+            isolation = role_def.frontmatter.isolation
+            if isolation == "worktree":
+                # D4:互斥
+                if type == "fork":
+                    raise ValueError(
+                        "fork mode + isolation=worktree 互斥;"
+                        "worktree 强制 definition 模式"
+                    )
+                if self._worktree_manager is None:
+                    raise ValueError(
+                        f"role {role_def.name!r} 声明 isolation=worktree,"
+                        " 但 SubAgentRuntime 未注入 WorktreeManager"
+                    )
+                assert self._worktree_init_config is not None
+                # 用 role name 作为 worktree 名(已经过 AgentFrontmatter
+                # `_validate_name` 校验,合法字符集)
+                wt_spec = await self._worktree_manager.create(role_def.name)
+                await WorktreeInitializer.run(
+                    wt_spec.path, self._project_root,
+                    self._worktree_init_config,
+                )
+                worktree_state = wt_spec.state  # "active"
+                worktree_name = role_def.name
+                effective_project_root = wt_spec.path
+                log.debug(
+                    "sub-Agent %s 走 worktree 隔离: %s",
+                    task_id, wt_spec.path,
+                )
 
         # ---- 工具过滤 ----
         # 父 Agent 的全部工具 = 父 Agent.available_tools,这里用 ToolRegistry 全集
@@ -169,13 +227,15 @@ class SubAgentRuntime:
 
         # 2) MergedPermissions + RuleEngine:fresh,fork 模式从 parent_denied_counts
         #    复制初始 session_rules
+        # v1.3:worktree sub-Agent 的 real_root 指向 worktree_path(让
+        # PathSandbox 在 worktree 内做沙箱,主 repo 内路径不被允许)
         sub_merged = MergedPermissions(
             rules=[],
             mode=self._config.permissions_v5.mode
             if self._config.permissions_v5
             else "default",
             sources_loaded=[],
-            real_root=self._project_root,
+            real_root=effective_project_root,
             path_sandbox_enabled=True,
             session_rules=[],
         )
@@ -195,6 +255,11 @@ class SubAgentRuntime:
             "role": role_def.name if role_def else None,
             "type": type,
             "depth": 1,  # v1.2 L1 物理禁嵌套
+            "effective_project_root": (
+                str(effective_project_root) if worktree_name else None
+            ),
+            "worktree_state": worktree_state,
+            "worktree_name": worktree_name,
         }
 
         # ---- 构造 Agent ----
@@ -240,7 +305,7 @@ class SubAgentRuntime:
             permissions_engine=sub_engine,
             compact_ctx=None,  # sub-Agent 不自动压
             instructions_text="",  # 不继承 instructions
-            project_root=self._project_root,
+            project_root=effective_project_root,
             skill_filter=None,
             skill_activation=None,
             skill_registry=None,
@@ -251,6 +316,11 @@ class SubAgentRuntime:
         # 注入 subagent_meta(供后续 lifecycle event payload 用,task 13 时
         # Agent._fire_lifecycle_safe 会读这个)
         sub_agent._subagent_meta = subagent_meta  # type: ignore[attr-defined]
+        # v1.3:worktree state 注入 Agent 实例,SubAgentManager._run_subagent
+        # 终态时读它决定是否调 exit
+        if worktree_name is not None:
+            sub_agent._worktree_state = worktree_state  # type: ignore[attr-defined]
+            sub_agent._worktree_name = worktree_name  # type: ignore[attr-defined]
         return sub_agent
 
     def _build_definition_prompt(

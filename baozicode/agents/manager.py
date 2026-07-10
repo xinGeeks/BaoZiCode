@@ -27,6 +27,7 @@ import logging
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, TYPE_CHECKING
 
 from baozicode.agents.filter import ToolFilterEmptyError
@@ -81,6 +82,9 @@ class TaskInfo:
     notification_pending: bool = False
     # 增量累积 sub-Agent 的文本输出,TUI 卡片用来轮询刷新
     last_text: str = ""
+    # v1.3:worktree 隔离元数据;None = 走 v1.2 行为(共享主 project_root)
+    worktree_name: str | None = None
+    worktree_state: "Any | None" = None  # WorktreeState literal;延迟 import
 
     @property
     def role_label(self) -> str:
@@ -118,12 +122,15 @@ class SubAgentManager:
         max_concurrent: int = 5,
         task_retention_minutes: int = 5,
         main_agent_ref: Callable[[], "Agent | None"] | None = None,
+        worktree_manager: "Any | None" = None,
     ) -> None:
         self._runtime = runtime
         self._main_conv = main_conversation
         self._max_concurrent = max_concurrent
         self._retention_seconds = task_retention_minutes * 60
         self._main_agent_ref = main_agent_ref
+        # v1.3:worktree 持有,供 _run_subagent 终态 exit 调
+        self._worktree_manager = worktree_manager
         self._tasks: dict[str, TaskInfo] = {}
         # 异步任务句柄(async=True 的 task_id → asyncio.Task),用于 cancel
         self._asyncio_tasks: dict[str, asyncio.Task[None]] = {}
@@ -182,7 +189,7 @@ class SubAgentManager:
 
     # ---- 派发 API ----
 
-    def dispatch(
+    async def dispatch(
         self,
         *,
         type: Literal["definition", "fork"],  # noqa: A002
@@ -213,6 +220,9 @@ class SubAgentManager:
             - 错误(未知 role / ToolFilter 空集) → ToolResult(is_error=True)
               注意:错误时**不**抛,直接返回 ToolResult,这样 task tool 走 LLM 路径
               时也能拿到错误反馈
+
+        v1.3 变更:`async def`(原本 sync);`spawn` 因 worktree 创建
+        需要 await,沿链路向上翻成 async。
         """
         self._cleanup_expired()
 
@@ -261,7 +271,7 @@ class SubAgentManager:
                 if parent_conversation is not None
                 else None
             )
-            sub_agent = self._runtime.spawn(
+            sub_agent = await self._runtime.spawn(
                 task_id=task_id,
                 type=type,
                 role_def=role_def,
@@ -286,6 +296,9 @@ class SubAgentManager:
             )
 
         task.agent = sub_agent
+        # v1.3:从 sub_agent 取 worktree 元数据(由 spawn 注入)
+        task.worktree_name = getattr(sub_agent, "_worktree_name", None)
+        task.worktree_state = getattr(sub_agent, "_worktree_state", None)
         self._tasks[task_id] = task
 
         if async_:
@@ -370,8 +383,12 @@ class SubAgentManager:
 
     # ---- 内部 ----
 
-    def _run_subagent(self, task: TaskInfo) -> None:
-        """跑一个 sub-Agent 的 async coroutine(后台 task 的入口)。"""
+    async def _run_subagent(self, task: TaskInfo) -> None:
+        """跑一个 sub-Agent 的 async coroutine(后台 task 的入口)。
+
+        v1.3 变 `async def`(原本 sync 但内部 `run_until_complete` 偷
+        渡);worktree exit 在 finally 块调。
+        """
         task.state = "running"
         task.started_at = datetime.now(tz=timezone.utc)
         agent = task.agent
@@ -388,16 +405,42 @@ class SubAgentManager:
             self._forward_cancel(task.cancel_event, original_cancel)
         )
 
+        # v1.3 D11:worktree sub-Agent → Bash `cwd` 绑定到
+        # effective_project_root;Bash.execute 看到 cwd_override 时
+        # 调此 validator 确认 cwd 在 worktree 内。
+        cwd_validator_set = False
+        if task.worktree_name is not None and self._worktree_manager is not None:
+            try:
+                wt_root = (
+                    self._worktree_manager.worktrees_root
+                    / task.worktree_name
+                ).resolve()
+                from baozicode.tools import bash as bash_mod
+
+                def _validator(p: Path) -> bool:
+                    try:
+                        p_resolved = p.resolve()
+                    except OSError:
+                        return False
+                    try:
+                        p_resolved.relative_to(wt_root)
+                        return True
+                    except ValueError:
+                        return False
+
+                bash_mod.set_cwd_validator(_validator)
+                cwd_validator_set = True
+            except Exception:  # noqa: BLE001
+                pass
+
         last_text: str | None = None
         try:
             # 把 last assistant text 抽出(用于 result 摘要)
             # 用一个简易 collector 走 Agent.run 的事件流
-            coro = agent.run(task.prompt)
-            loop = asyncio.get_event_loop()
-            agen = coro.__aiter__()
+            agen = agent.run(task.prompt).__aiter__()
             while True:
                 try:
-                    event = loop.run_until_complete(agen.__anext__())
+                    event = await agen.__anext__()
                 except StopAsyncIteration:
                     break
                 if event.type == "text":
@@ -433,8 +476,53 @@ class SubAgentManager:
             task.error = f"{type(exc).__name__}: {exc}"
         finally:
             forwarder.cancel()
+            # v1.3 D11:清 Bash cwd_validator(避免泄漏到下一 task)
+            if cwd_validator_set:
+                try:
+                    from baozicode.tools import bash as bash_mod
+
+                    bash_mod.set_cwd_validator(None)
+                except Exception:  # noqa: BLE001
+                    pass
             task.finished_at = datetime.now(tz=timezone.utc)
+            # v1.3:worktree 终态退出(按 task state 决定 force)
+            await self._handle_worktree_exit(task)
             self._on_subagent_done(task)
+
+    async def _handle_worktree_exit(self, task: TaskInfo) -> None:
+        """sub-Agent 终态后,若有 worktree → 调 `WorktreeManager.exit`。
+
+        决策:
+        - `state in {"done", "failed"}` → `force=False`(允许 exit
+          决策树:clean 删,dirty 留 detached)
+        - `state == "canceled"` → `force=True`(用户主动取消,
+          worktree 不必保留)
+        - 没 worktree / manager → no-op
+        """
+        if task.worktree_name is None:
+            return
+        if self._worktree_manager is None:
+            log.warning(
+                "task %s 有 worktree 但 manager 未配,无法 exit",
+                task.task_id,
+            )
+            return
+        try:
+            force = task.state == "canceled"
+            result = await self._worktree_manager.exit(
+                task.worktree_name, force=force,
+            )
+            task.worktree_state = result.state  # "removed" / "detached"
+            log.info(
+                "task %s worktree 终态: name=%s state=%s reason=%s",
+                task.task_id, task.worktree_name,
+                result.state, result.reason,
+            )
+        except Exception as exc:
+            # 不让 worktree 异常搞砸 task 收尾
+            log.exception(
+                "task %s worktree exit 失败: %s", task.task_id, exc,
+            )
 
     async def _forward_cancel(
         self,
@@ -667,7 +755,7 @@ async def _do_dispatch(
     - summary str:sync 成功
     - ToolResult:错误 / 超时 demote(已经是 ToolResult 直接返回)
     """
-    raw = manager.dispatch(
+    raw = await manager.dispatch(
         type=type,
         role=role,
         prompt=prompt,

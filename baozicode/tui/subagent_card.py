@@ -8,6 +8,10 @@
 
 状态机由 ChatScreen 的 0.5s 轮询驱动 — 每次 card.refresh(task) 都重渲。
 terminal 状态后 30s 自动从 DOM 移除(retention 复用 SubAgentManager 的窗口)。
+
+v1.3 增量:卡片展开后多一行 `cwd: <path>`,仅在 `task.worktree_name` 非
+None(走 worktree 隔离)时显示。展示相对 setup_dir 的子路径(让用户
+一眼看到「这个 sub-Agent 在 .worktrees/<name>/ 里跑」)。
 """
 
 from __future__ import annotations
@@ -75,6 +79,8 @@ class SubAgentCard(Static):
         self._type_label = type_label
         self._state: TaskState | None = None  # type: ignore[assignment]
         self._last_text: str = ""
+        self._worktree_name: str | None = None  # v1.3
+        self._worktree_state: str | None = None  # v1.3
         self._expanded: bool = False
 
     @property
@@ -95,6 +101,8 @@ class SubAgentCard(Static):
         """
         self._state = task.state
         self._last_text = task.last_text or ""
+        self._worktree_name = getattr(task, "worktree_name", None)
+        self._worktree_state = getattr(task, "worktree_state", None)
         self._render()
         # 终态标记 class(border 颜色变化)
         if task.state in ("done", "canceled", "timeout"):
@@ -109,11 +117,20 @@ class SubAgentCard(Static):
 
     def _render(self) -> None:
         state = self._state or "pending"
+        # v1.3:worktree 隔离 sub-Agent 才显示 cwd 行
+        cwd_line = ""
+        if self._worktree_name is not None:
+            wt_state = self._worktree_state or "?"
+            cwd_line = (
+                f"[dim]cwd: .worktrees/{self._worktree_name}/ "
+                f"(worktree: {wt_state})[/dim]\n"
+            )
         if self._expanded:
             body = self._last_text or "(尚无文本输出)"
             self.update(
                 f"[bold]◉ {self._role_label}[/bold] "
                 f"[dim]({self._type_label} · {state})[/dim]\n"
+                f"{cwd_line}"
                 f"{body}\n"
                 f"[dim]task_id={self._task_id} · Enter 折叠[/dim]"
             )
@@ -130,8 +147,11 @@ class SubAgentCard(Static):
                     f"[bold]◉ {self._role_label}[/bold] "
                     f"[dim]({self._type_label} · {state})[/dim]"
                 )
+            # 折叠态只在 worktree 模式下 cwd 一行(占行少)
+            extra = cwd_line if cwd_line else ""
             self.update(
                 f"{head}\n"
+                f"{extra}"
                 f"[dim]task_id={self._task_id} · Enter 展开[/dim]"
             )
 
