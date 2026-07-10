@@ -5,9 +5,11 @@ Screen {
 }
 
 /* 主对话区:无边框 / 无 padding(只有 1 列水平 margin 让文字不贴边)
-   内容靠自身 margin 撑行间距,Claude Code 风格 */
+   内容靠自身 margin 撑行间距,Claude Code 风格。
+   height: auto 让区域跟随内容高度,避免短对话时下方留白;
+   内容超长时自动滚动(VerticalScroll 自带 scroll behavior)。 */
 #chat-scroll {
-    height: 1fr;
+    height: auto;
     padding: 0 1;
 }
 
