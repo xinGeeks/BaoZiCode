@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-1.2.0-blue)
+![version](https://img.shields.io/badge/version-1.3.0-blue)
 
 ## 是什么
 
@@ -748,17 +748,22 @@ baozicode/
 │       ├── review/SKILL.md # independent, history-bubbles: 3
 │       └── test/SKILL.md   # independent, history-bubbles: 2
 ├── agents/                 # v1.2 新增 — SubAgent Delegation
-│   ├── schema.py           # AgentFrontmatter(Pydantic) / AgentDef / parse_agent
+│   ├── schema.py           # AgentFrontmatter(Pydantic, v1.3 +isolation)/ AgentDef / parse_agent
 │   ├── registry.py         # AgentRegistry(3 级 scan + 优先级合并 + plugin 合并)
 │   ├── loader.py           # substitute_placeholders({var} / {var:default})
 │   ├── filter.py           # ToolFilter(4 层 AND + GLOBAL_DENY={task} + cache)
-│   ├── runtime.py          # SubAgentRuntime(spawn — 状态隔离 + BuiltPrompt 分流)
-│   ├── manager.py          # SubAgentManager(dispatch 派发 + 状态机 + cascade cancel)
-│   │                       #   + TASK_TOOL + task_executor(`task` 工具暴露给主 Agent)
+│   ├── runtime.py          # SubAgentRuntime(spawn — 状态隔离 + BuiltPrompt 分流,v1.3 +isolation 分支)
+│   ├── manager.py          # SubAgentManager(dispatch 派发 + 状态机 + cascade cancel
+│   │                       #   + v1.3 worktree 退出决策 + _run_subagent finally 块)
 │   ├── plugin.py           # fetch_plugin_agents(MCP resources/read 协议)
 │   └── builtin/            # 2 个样板 sub-Agent
 │       ├── explorer/AGENT.md  # definition + tools=[Read,Grep,Glob,WebFetch]
 │       └── summarizer/AGENT.md  # definition + model=haiku
+├── worktree/               # v1.3 新增 — Git Worktree 隔离层
+│   ├── schema.py           # WorktreeSpec / WorktreeState / 错误枚举 + WorktreePathValidator
+│   ├── manager.py          # WorktreeManager(create / enter / exit / remove / list_active + fast-path)
+│   ├── initializer.py      # WorktreeInitializer 4 步(link / copy / hooks / gitignore)
+│   └── cleanup.py          # WorktreeCleanupDaemon(三层过滤后台清理)
 ├── tui/
 │   ├── chat_screen.py      # 主对话屏幕(订阅 Agent 事件流 + 状态栏 [agents: ...] + 0.5s 轮询 sub-Agent)
 │   ├── tool_card.py        # ToolCallCard / ToolResultCard
@@ -818,6 +823,11 @@ Agent                                          # 业务逻辑下沉,完全脱离
   │   ├─ parallel batch → asyncio.gather        │
   │   └─ sequential batch → 逐个 await          │
   └── run() → AsyncIterator[AgentEvent]         # 5 种 StopReason
+  ↓
+WorktreeManager(v1.3,optional)                 # isolation: worktree 角色走这里
+  ├─ create(name) → git worktree add + Initializer 4 步
+  ├─ exit(name, force?) → 决策树(干净删 / dirty 留 detached)
+  └─ CleanupDaemon 后台三层过滤(task 活跃 → 时间 → 干净度)
   ↓
 ConversationManager  →  LLMClient (抽象)
                           ├─ AnthropicBackend   (message_delta.usage)
