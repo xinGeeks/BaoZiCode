@@ -23,12 +23,15 @@ Screen {
    占满整个屏幕，把 #chat-scroll (height: 1fr) 挤到 0 行高。
 
    v0.3:StatusBar 也占底部 1 行,与 Input 一起占底部 4 行。
-   把 StatusBar 放在 DOM 里位于 Scroll 与 Input 中间即可,无需 dock。 */
+   把 StatusBar 放在 DOM 里位于 Scroll 与 Input 中间即可,无需 dock。
+
+   v1.3 调整:Input 收成 height 1 + 单上边框,tall 边框 + 3 行高 → 1 行,
+   把 2 行还给 #chat-scroll;StatusBar 内容简短,1 行够用。 */
 #input {
     dock: bottom;
     width: 100%;
-    height: 3;
-    border: tall $secondary;
+    height: 1;
+    border-top: solid $secondary;
     padding: 0 1;
 }
 
