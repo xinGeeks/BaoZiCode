@@ -67,11 +67,10 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   `.lock`)原子 JSONL 追加 + 缺字段填默认 + 异步 `wait_for_wake`;
   `mailbox_lock` 跨平台(POSIX `fcntl.flock` / Windows `msvcrt.locking`)+
   30s stale 偷锁;`TeamsRegistry` 全局索引 + `TeamStore` 单 team 目录操作;
-  `baozicode team create/list/show/use/destroy` 5 子命令。完整 dispatch /
-  pane 后端 / coordinator 模式留给后续 3 个 proposal(team-tools /
-  pane-backend / coordinator)
+  `baozicode team create/list/show/use/destroy` 5 子命令。tools / pane
+  后端已完成;coordinator 模式留给后续 proposal。
 
-## 当前版本：v1.4 (Foundation)
+## 当前版本：v1.4 (Pane Backend)
 
 - ✅ **Worktree 隔离(v1.3 新增 — 主特性)** — `baozicode/worktree/`
   - sub-Agent role frontmatter 加 `isolation: worktree` → 该 sub-Agent 在独立
@@ -713,6 +712,58 @@ baozicode team use devops
 
 - **v1-4-team-pane-backend** —— tmux / iTerm2 / Windows Terminal 派成员 + watchdog wake + resume
 - **v1-4-team-coordinator** —— 双锁开关 + Lead 自动剥夺写文件工具
+
+## Member Runtime(v1.4 Pane Backend)
+
+把每个 member 真正派生到 tmux / iTerm2 / Windows Terminal pane(或进程内
+coroutine),Lead Agent 通过 mailbox 跨进程派活。这是 v1.4 的第 3 个
+proposal(`v1-4-team-pane-backend`)—— 在 foundation + tools 之上
+落地 5 种 BackendType + BackendManager + `baozicode member run` CLI。
+
+**5 种 BackendType**:
+
+| BackendType             | 平台        | 启动方式                              |
+|-------------------------|-------------|---------------------------------------|
+| `pane-tmux`             | Linux/macOS | `tmux split-window`                   |
+| `pane-iterm2`           | macOS       | AppleScript 新 tab                    |
+| `pane-windows-terminal` | Windows     | `wt.exe -w 0 nt`                      |
+| `coroutine`             | 全部        | 进程内 asyncio.Task                   |
+| `worktree-coroutine`    | 全部        | coroutine + v1.3 WorktreeManager      |
+
+**Member lifecycle**:
+
+```
+Lead 调 team_dispatch(team, member, body, task_id?)
+  ↓
+  Mailbox.append_message(inbox) + Mailbox.touch_wake
+  ↓ (BackendManager.spawn_if_offline)
+  effective_backend → pane / coroutine
+  ↓
+  handle.spawn() → pane 起 / asyncio.Task 起
+  ↓
+  state=idle + pane_info.json 持久化
+  ↓
+Member MainLoop 轮询 wait_for_wake(200ms):
+  → wake.signal 变化 → fresh Agent 处理 inbox
+  → tool 发出 mailbox write → outbox.append_message
+  → DONE → state=idle + 继续等
+  → SIGINT/SIGTERM → request_terminate() → state=offline
+```
+
+**Member CLI 入口**:
+
+```bash
+# Lead 通过 team_dispatch 派生后,后台跑:
+baozicode member run --team devops --name alice
+
+# 等价后台启动(Linux + tmux),可指定 cwd:
+baozicode member run --team devops --name alice --cwd /tmp/alice-wt
+```
+
+退出码:`0` graceful / `3` team 不存在 / `6` member 不存在 / `4` IO /
+`5` config / `2` argparse。
+
+详细:[docs/migrations/v1.4-tools-to-v1.4-pane-backend.md](./docs/migrations/v1.4-tools-to-v1.4-pane-backend.md)
 
 详细：[docs/migrations/v1.4-foundation-to-v1.4-tools.md](./docs/migrations/v1.4-foundation-to-v1.4-tools.md)
 

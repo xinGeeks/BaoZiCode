@@ -154,6 +154,12 @@ class BaoZiCodeApp(App):
         self.mailbox_notifier: Any = None
         # team 工具是否已注册到 ToolRegistry(幂等标记)
         self._team_tools_registered: bool = False
+        # BackendManager —— 居中调度 5 种 pane/coroutine backend。
+        # 由 `_build_teams_registry` 在 teams registry 就绪后构造,
+        # 注入到 `_register_team_tools_sync` 闭包,让 team_dispatch /
+        # team_cancel 能调 spawn_if_offline / kill。
+        # **跨 Lead restart 持久**:`use_team` 不重建、`on_unmount` 不清理。
+        self.backend_manager: Any = None
 
         # ---- v0.8:SessionArchiver + sessions 列表 ----
         # sessions.bootstrap 跑过期清理、构造当前 session 的 archiver、列已有 sessions
@@ -351,6 +357,10 @@ class BaoZiCodeApp(App):
         team_* 工具注册到全局 ToolRegistry(LLM 通过 role_visibility
         看到它们)。
 
+        v1.4-pane-backend:同时构造 `BackendManager`,注入到 team 工具
+        executor 闭包,让 `team_dispatch` / `team_cancel(terminate=True)`
+        能调 spawn_if_offline / kill。
+
         Returns:
             `TeamsRegistry` 实例,或 None 当 disabled
         """
@@ -372,10 +382,36 @@ class BaoZiCodeApp(App):
             )
             self.teams = None
             return None
+        # v1.4-pane-backend:构造 BackendManager singleton(跨 Lead restart 持久)
+        self._ensure_backend_manager()
         # 同步注册 team 工具(幂等);同步阻塞以保证 on_mount 后工具已就绪
         # —— ChatScreen 第一条消息到来前必须看到 team_*。
         self._register_team_tools_sync()
         return self.teams
+
+    def _ensure_backend_manager(self) -> None:
+        """v1.4-pane-backend — 构造 BackendManager(若还没有)。
+
+        Idempotent:BackendManager 是 singleton,跨 Lead restart 持久 —
+        `use_team` 不重建、`on_unmount` 不清理。构造失败 → 静默置 None,
+        team 工具降级到 v1-4-team-tools 阶段行为(无 spawn/kill)。
+        """
+        if self.backend_manager is not None:
+            return
+        if self.teams is None:
+            return
+        try:
+            from baozicode.teams.backend_manager import BackendManager
+
+            self.backend_manager = BackendManager(
+                self.teams, project_root=self.project_root,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "BackendManager 构造失败: %s: %s",
+                type(exc).__name__, exc,
+            )
+            self.backend_manager = None
 
     def _register_team_tools_sync(self) -> None:
         """v1.4 team-tools — 把 6 个 team_* 工具注册到全局 ToolRegistry。
@@ -386,6 +422,10 @@ class BaoZiCodeApp(App):
 
         Idempotent:`_team_tools_registered` 标记 + register_team_tools 内
         部撞名捕获,重复调安全。
+
+        v1.4-pane-backend:把 `self.backend_manager` 透传给
+        register_team_tools,让 team_dispatch / team_cancel 拿到 spawn /
+        kill 钩子。
         """
         if self._team_tools_registered:
             return
@@ -404,7 +444,10 @@ class BaoZiCodeApp(App):
 
         try:
             await register_team_tools(
-                get_default_tool_registry(), self.teams, self.project_root
+                get_default_tool_registry(),
+                self.teams,
+                self.project_root,
+                backend_manager=self.backend_manager,
             )
             self._team_tools_registered = True
         except Exception as exc:  # noqa: BLE001
@@ -668,6 +711,10 @@ class BaoZiCodeApp(App):
         self.teams = None
         self.active_team_name = None
         self.mailbox_notifier = None
+        # v1.4-pane-backend:BackendManager **不清理** — panes 跨 Lead restart 持久。
+        # `team destroy` 会显式调 cleanup_team;App 关闭保留 pane 让
+        # 下次启动 restore_panes 接管。仅丢引用让 GC 回收 wrapper 即可。
+        self.backend_manager = None
         # 注销 6 个 team_* 工具 — ToolRegistry 单例跨 App 复用,on_unmount
         # 必须清,避免下次启动残留同名工具。
         if self._team_tools_registered:

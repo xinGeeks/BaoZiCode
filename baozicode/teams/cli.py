@@ -3,7 +3,9 @@
 公开 API:
 
 - `add_subcommand(subparsers)` — 把 `team` 二级子命令挂到顶层 argparse
+- `add_member_subcommand(subparsers)` — 把 `member` 二级子命令挂到顶层 argparse
 - `main(argv=None)` — 独立跑入口(`python -m baozicode.teams.cli`)
+- `main_member_run(args)` — async entry for `member run`
 
 子命令结构(`team <action> [...]`):
 
@@ -14,7 +16,12 @@
   (后续 v1-4-team-tools / team-coordinator proposal 实现完整 dispatch)
 - `destroy <name>` — 删 team(`--yes/-y` 跳交互 / `--force` 容错目录不在)
 
-全局 flag(`team` 这一层):
+子命令结构(`member run [...]`):
+
+- `run --team <name> --name <member> [--cwd PATH]` — 起 member 长生命周期
+  polling 进程(`MemberMainLoop`);SIGINT/SIGTERM → graceful terminate
+
+全局 flag(`team` / `member` 这一层):
 
 - `--config / -c PATH` — 配置文件(默认走 bootstrap 查找顺序)
 - `--teams-dir PATH` — 覆盖 `teams.dir`(应急 / 测试用)
@@ -24,9 +31,10 @@
 - 0 = success
 - 1 = 通用错误(参数解析失败 / 用户拒删等)
 - 2 = team 名不合法(`TeamName*`)
-- 3 = team / member 不存在(`TeamNotFound` / `MemberNotFound`)
+- 3 = team 不存在(`TeamNotFound`)
 - 4 = 权限 / IO 错(`PermissionError` / `OSError` / `FileExistsError`)
 - 5 = 配置错误(`ConfigError`)
+- 6 = member 不存在(`MemberNotFound`)
 
 错误输出格式(stderr):
 
@@ -41,6 +49,9 @@
   这跟 v1.3 worktree 的 `--yes` 风格一致。
 - `list` 空 → `(no teams)`,让 LLM / 脚本能区分"目录不存在" vs "team
   还没创建"。
+- `member run` 是 v1.4-pane-backend 阶段新增的 Member 进程入口;
+  派生路径(coroutine / tmux / iTerm2 / WT)由 BackendManager.spawn_if_offline
+  决定,CLI 这层只负责启动 polling loop。
 """
 
 from __future__ import annotations
@@ -51,7 +62,10 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from baozicode.config.loader import ConfigError, load_config
+from baozicode.llm.factory import create_client
+from baozicode.permissions import bootstrap as perm_bootstrap
 
+from .member_loop import MemberMainLoop
 from .registry import TeamsRegistry
 from .schema import (
     TeamAlreadyExists,
@@ -70,6 +84,7 @@ EXIT_NAME_INVALID = 2
 EXIT_NOT_FOUND = 3
 EXIT_IO = 4
 EXIT_CONFIG = 5
+EXIT_MEMBER_NOT_FOUND = 6
 
 
 # ---------------------------------------------------------------------------
@@ -355,15 +370,190 @@ def main(argv: Sequence[str] | None = None) -> int:
     return handler(args)
 
 
+# ---------------------------------------------------------------------------
+# `member run` 子命令(异步入口)
+# ---------------------------------------------------------------------------
+
+
+def add_member_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    """注册 `member` 子命令到顶层 argparse。
+
+    结构::
+
+        baozicode [member] [--config C] [--teams-dir D] run \
+            --team <team> --name <member> [--cwd <path>]
+
+    Args:
+        subparsers: 顶层 `parser.add_subparsers(...)` 返回的 _SubParsersAction
+    """
+    member_parser = subparsers.add_parser(
+        "member",
+        help="Member runtime (run a member process in the foreground)",
+        description="启动 Member 长生命周期 polling 进程;常驻前台。",
+    )
+    member_parser.add_argument(
+        "--config",
+        "-c",
+        type=str,
+        default=None,
+        help="配置文件路径(默认走 bootstrap 查找顺序)",
+    )
+    member_parser.add_argument(
+        "--teams-dir",
+        type=str,
+        default=None,
+        help="覆盖 teams.dir(应急 / 测试用)",
+    )
+
+    member_subs = member_parser.add_subparsers(
+        dest="member_action",
+        required=True,
+        metavar="<action>",
+    )
+
+    # run
+    p_run = member_subs.add_parser(
+        "run",
+        help="起 Member 进程(`MemberMainLoop.run()`);SIGINT/SIGTERM → graceful terminate",
+    )
+    p_run.add_argument(
+        "--team",
+        required=True,
+        type=str,
+        help="team 名(`team list` 看)",
+    )
+    p_run.add_argument(
+        "--name",
+        required=True,
+        type=str,
+        help="member 名(team.json `members.<name>`)",
+    )
+    p_run.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        help="覆盖 member.workdir(默认走 team.json 字段)",
+    )
+
+
+async def main_member_run(args: argparse.Namespace) -> int:
+    """`baozicode member run --team T --name M` 的 async 入口。
+
+    流程:
+      1. bootstrap registry(team 不存在 → exit 3)
+      2. `team = store.show()`;member 不存在 → exit 6
+      3. chdir 到 `--cwd` 或 `member.workdir`(不存在则 mkdir)
+      4. bootstrap LLM client + permissions
+      5. `loop = MemberMainLoop(...)`
+      6. 注册 SIGINT/SIGTERM handler → `loop.request_terminate()`
+      7. `await loop.run()`(graceful exit 后写 state=offline)
+
+    Returns:
+        退出码
+    """
+    import asyncio as _asyncio
+    import os as _os
+    import signal as _signal
+
+    registry = _build_registry(args)
+    store = registry.get(args.team)
+    if store is None:
+        print(
+            f"Error: TeamNotFound: team {args.team!r} 不存在",
+            file=sys.stderr,
+        )
+        return EXIT_NOT_FOUND
+    team = store.show()
+    if args.name not in team.members:
+        print(
+            f"Error: MemberNotFound: member {args.name!r} 在 team "
+            f"{args.team!r} 中不存在",
+            file=sys.stderr,
+        )
+        return EXIT_MEMBER_NOT_FOUND
+    member = team.members[args.name]
+
+    # 3) chdir
+    cwd_raw = getattr(args, "cwd", None) or member.workdir or f".worktrees/{args.name}/"
+    cwd = Path(cwd_raw).expanduser()
+    if not cwd.is_absolute():
+        cwd = Path.cwd() / cwd
+    cwd.mkdir(parents=True, exist_ok=True)
+    try:
+        _os.chdir(cwd)
+    except OSError as exc:
+        print(
+            f"Error: OSError: chdir {cwd} 失败: {exc}",
+            file=sys.stderr,
+        )
+        return EXIT_IO
+
+    # 4) bootstrap config + LLM + permissions
+    try:
+        config = load_config(getattr(args, "config", None))
+    except ConfigError as exc:
+        print(f"Error: ConfigError: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+
+    try:
+        llm_client = create_client(config)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"Error: LLMClientError: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG
+
+    permissions = perm_bootstrap(cwd, config)
+
+    # 5) MemberMainLoop
+    loop = MemberMainLoop(
+        registry,
+        args.team,
+        args.name,
+        llm_client=llm_client,
+        config=config,
+        permissions=permissions,
+        project_root=cwd,
+    )
+
+    # 6) signal handler — graceful terminate
+    # 用 `loop.add_signal_handler`(Unix 优先),Windows fallback 到
+    # `signal.signal`。两者都装,asyncio 不会冲突。
+    running_loop = _asyncio.get_running_loop()
+    _sigterm_handler = lambda: loop.request_terminate()  # noqa: E731
+    for sig_name in ("SIGINT", "SIGTERM"):
+        sig = getattr(_signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            running_loop.add_signal_handler(sig, _sigterm_handler)
+        except (NotImplementedError, RuntimeError):
+            # Windows:fallback 到 signal.signal
+            _signal.signal(sig, lambda *_: _sigterm_handler())
+
+    # 7) run loop
+    try:
+        await loop.run()
+    except _asyncio.CancelledError:
+        pass
+    except KeyboardInterrupt:
+        loop.request_terminate()
+    return EXIT_OK
+
+
 __all__ = [
     "add_subcommand",
+    "add_member_subcommand",
     "main",
+    "main_member_run",
     "EXIT_OK",
     "EXIT_GENERIC",
     "EXIT_NAME_INVALID",
     "EXIT_NOT_FOUND",
     "EXIT_IO",
     "EXIT_CONFIG",
+    "EXIT_MEMBER_NOT_FOUND",
 ]
 
 

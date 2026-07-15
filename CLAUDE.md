@@ -200,8 +200,35 @@ v1.4 分 **4 个独立 proposal + 独立 archive** 推进:
     `git rev-parse` 校验 repo + `git checkout target` +
     字典序 `git merge --no-ff wt/<name>` 顺序合,冲突
     `git merge --abort` + 收集 aborted 列表,best-effort
-- **v1-4-team-pane-backend** (后续) — tmux / iTerm2 / Windows Terminal
-  pane 后端实际派生 + 唤醒 + 从 `state.json` resume
+- **`v1-4-team-pane-backend`** (本段 — 已完成) — 在 foundation + tools 之上:
+  - **5 种 BackendType**(`baozicode/teams/pane.py`)`BackendHandle` Protocol
+    + 5 实现(pane-tmux / pane-iterm2 / pane-windows-terminal /
+    coroutine / worktree-coroutine)
+  - **BackendManager**(`baozicode/teams/backend_manager.py`)居中调度
+    `effective_backend` 决策树 + `spawn_if_offline` asyncio.Lock dedup +
+    `restore_panes` Lead 重启 hydrate + `cleanup_team` team destroy 清理
+  - **pane_info.json**(`baozicode/teams/pane_info.py`)`PaneInfo` frozen
+    dataclass + `PaneMemberInfo` + 原子 write-then-rename,持久化 backend
+    类型 + pane 句柄 + pid + last_active_ts,跨 Lead restart 恢复
+  - **MemberAgent + MailboxLayer**(`baozicode/teams/member_agent.py`)
+    role='member' + 7 工具子集 + MailboxLayer 内部走 Mailbox staticmethod
+    读写,每轮 fresh Agent(无跨 turn conversation)
+  - **MemberMainLoop**(`baozicode/teams/member_loop.py`)
+    `wait_for_wake(200ms 轮询 wake.signal)` + `_run_turn(订阅 events +
+    tool → outbox 自动转)` + 异常不挂 turn + `request_terminate()` 优雅退出
+  - **`baozicode member run` CLI**(顶层 `member` + `run` 子命令)
+    bootstrap registry → chdir → bootstrap config/LLM/perms →
+    构造 MemberMainLoop → SIGINT/SIGTERM handler → `await loop.run()`;
+    退出码 0/3/6/4/5/2
+  - **team-tools spawn 钩子**(`baozicode/teams/tools.py`):
+    `execute_team_dispatch` 末尾调 `spawn_if_offline`(返回 content 含
+    `backend=<type>`);`execute_team_cancel(terminate=True)` 改走
+    `backend_manager.kill(grace_seconds=5.0)` 替代 v1-4-team-tools 阶段的
+    裸 `os.kill(state.backend_pid, SIGTERM)`
+  - **App 接线**(`baozicode/app.py`):`__init__` 加 `backend_manager` 字段;
+    `_build_teams_registry` 末尾 `_ensure_backend_manager()` 构造 singleton;
+    `register_team_tools` 接 `backend_manager` kwarg 注入闭包;
+    `use_team` 不重建 / `on_unmount` 不清理(panes 跨 Lead restart 持久)
 - **v1-4-team-coordinator** (后续) — 双锁开关(配置 `teams.coordinator.enabled`
   + 环境变量 `BAOZICODE_COORDINATOR=1`)+ 剥夺写文件工具
 

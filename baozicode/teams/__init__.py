@@ -1,4 +1,4 @@
-"""v1.4 Team Foundation — Team / Member / Message / Mailbox / Lockfile 数据层。
+"""v1.4 Team Foundation + Pane Backend — Team / Member / Mailbox / 后端派生。
 
 公开 API:
 
@@ -37,7 +37,22 @@ proposal(team-tools / team-pane-backend / team-coordinator)在此之上
 from __future__ import annotations
 
 from .lockfile import MailboxLockError, MailboxLockTimeout, mailbox_lock
+from .backend_manager import BackendManager
 from .mailbox import Direction, Mailbox
+from .member_agent import MailboxLayer, build_member_agent
+from .member_loop import MemberMainLoop
+from .pane import (
+    DEFAULT_TMUX_SESSION_PREFIX,
+    BackendHandle,
+    CoroutineBackend,
+    PaneITerm2Backend,
+    PaneTmuxBackend,
+    PaneWindowsTerminalBackend,
+    WorktreeCoroutineBackend,
+    tmux_session_name,
+    tmux_window_target,
+)
+from .pane_info import PANE_INFO_SCHEMA_VERSION, PaneInfo, PaneMemberInfo
 from .registry import TeamsRegistry
 from .schema import (
     BackendType,
@@ -73,19 +88,28 @@ from .tools import register_team_tools, unregister_team_tools
 __all__ = [
     "ApprovalAction",
     "ApprovalProtocol",
+    "BackendHandle",
+    "BackendManager",
     "BackendType",
+    "CoroutineBackend",
+    "DEFAULT_TMUX_SESSION_PREFIX",
     "Direction",
     "Mailbox",
+    "MailboxLayer",
     "MailboxLockError",
     "MailboxLockTimeout",
     "MailboxNotifier",
     "Member",
     "MemberAlreadyExists",
+    "MemberMainLoop",
     "MemberNotFound",
     "MemberState",
     "MemberStatus",
     "Message",
     "MESSAGE_SCHEMA_VERSION",
+    "PANE_INFO_SCHEMA_VERSION",
+    "PaneInfo",
+    "PaneMemberInfo",
     "TEAM_SCHEMA_VERSION",
     "Task",
     "TaskCycleError",
@@ -104,10 +128,14 @@ __all__ = [
     "TeamNotFound",
     "TeamStore",
     "TeamsRegistry",
+    "WorktreeCoroutineBackend",
+    "build_member_agent",
     "default_member_state",
     "fill_message_timestamp",
     "mailbox_lock",
     "register_team_tools",
     "run_team_merge",
+    "tmux_session_name",
+    "tmux_window_target",
     "unregister_team_tools",
 ]

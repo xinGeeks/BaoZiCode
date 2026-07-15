@@ -43,10 +43,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="抑制启动 banner(指令 / 记忆 / 会话摘要)",
     )
-    # v1.4:顶层子命令分发(目前只有 `team`);无子命令 → 走 TUI 启动老路径
+    # v1.4:顶层子命令分发(`team` + `member`);无子命令 → 走 TUI 启动老路径
     sub = parser.add_subparsers(dest="top_command", metavar="<command>")
-    from baozicode.teams.cli import add_subcommand
+    from baozicode.teams.cli import add_subcommand, add_member_subcommand
     add_subcommand(sub)
+    add_member_subcommand(sub)
     return parser.parse_args(argv)
 
 
@@ -159,7 +160,7 @@ def _resolve_sessions_root(project_root: Path, config) -> Path:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    # v1.4:顶层子命令分发(目前只有 `team`);无 top_command → TUI 启动老路径
+    # v1.4:顶层子命令分发(`team` + `member`);无 top_command → TUI 启动老路径
     if getattr(args, "top_command", None) == "team":
         from baozicode.teams import cli as teams_cli
 
@@ -168,6 +169,15 @@ def main(argv: list[str] | None = None) -> int:
         # 解析。把 prog_name 去掉,再在最前面加 "team"。
         raw = argv[1:] if argv is not None else sys.argv[1:]
         return teams_cli.main(["team", *raw])
+
+    if getattr(args, "top_command", None) == "member":
+        from baozicode.teams.cli import main_member_run
+
+        # `member run` 是 async 入口;`add_member_subcommand` 已把
+        # `--team` / `--name` / `--cwd` 解析到 args 上。
+        # member_action 由 argparse required=True 兜底,这里只会
+        # 在 member_action="run" 时到达。
+        return asyncio.run(main_member_run(args))
 
     try:
         config = load_config(args.config)

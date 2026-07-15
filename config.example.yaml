@@ -495,11 +495,12 @@ subagents:
 # v1.4 teams — Team lifecycle 的配置
 # 不写本块则走默认:enabled=true, dir=~/.config/baozicode/teams/
 # v1-4-team-tools 在 foundation 之上加了 6 个 Lead-only 协作工具 + 共享
-# 任务清单 + Approval 协议 + MailboxNotifier + 角色过滤(`role_visibility`)，
-# 但配置维度未变 — 工具 / task 行为由 `apps.active_agent.role` 派生。
+# 任务清单 + Approval 协议 + MailboxNotifier + 角色过滤(`role_visibility`)。
+# v1-4-team-pane-backend 在 tools 之上落地 5 种 BackendType + BackendManager
+# 居中调度 + member pane 实际派生 + wake 唤醒 + state.json resume —
+# 不引入新 teams 块字段,通过 `Member.backend` 字段选 backend。
 #
-# 下面 coordinator / pane_backend 子块**保留位置**,字段留给后续 proposal:
-# - v1-4-team-pane-backend —— tmux / iTerm2 / Windows Terminal 后端派生 + wake
+# coordinator 子块**保留位置**,字段留给后续 proposal:
 # - v1-4-team-coordinator —— 双锁开关 + 工具白名单收缩
 # ─────────────────────────────────────────────────────────────────────
 teams:
@@ -517,13 +518,4 @@ teams:
   #                                    # 以外的写类工具;只留 Read/Grep/Glob/
   #                                    # WebFetch + team_* 协作工具。
   #                                    # (v1-4-team-coordinator 实现)
-
-  # ── reserved for v1-4-team-pane-backend ────────────────────────
-  # pane_backend:
-  #   default: tmux                    # tmux | iterm2 | windows-terminal |
-  #                                    # coroutine 之一;Lead 启动时按环境
-  #                                    # 优先级自动探测,失败透明降级到 coroutine
-  #                                    # (不静默降级 — 探测失败写 warning)。
-  #   tmux_session_prefix: baozicode   # tmux pane 命名空间,防与其他工具混淆。
-  #                                    # (v1-4-team-pane-backend 实现)
 

@@ -195,6 +195,137 @@ team-tools 段在 v1.4 Foundation 之上落地 6 个 Lead-only 协作工具 +
 详细迁移 + 6 工具使用 + Approval 流 + 任务 DAG 示例 +
 测试覆盖见 `docs/migrations/v1.4-foundation-to-v1.4-tools.md`。
 
+## [v1.4] — 2026-07 (Pane Backend)
+
+pane-backend 段在 v1-4-team-foundation + v1-4-team-tools 之上落地
+member pane 实际派生 + wake 唤醒 + state.json resume + 5 BackendType
+实现 + BackendManager 居中调度。
+
+### 新增能力
+
+- **5 种 BackendType**(`baozicode/teams/pane.py`)
+  - `pane-tmux` — tmux split-window 起 pane,`pane_id` 持久化
+  - `pane-iterm2` — macOS AppleScript 起新 window/tab,`window_id`
+    持久化
+  - `pane-windows-terminal` — Windows `wt.exe -w 0 nt` 起 pane,
+    `tab_uuid` 持久化
+  - `coroutine` — 进程内 asyncio Task(开发 / 测试默认)
+  - `worktree-coroutine` — coroutine + worktree 隔离(走 v1.3 WorktreeManager)
+  - 共同抽象:`BackendHandle` Protocol(`backend_type` / `pid` /
+    `is_alive()` / `spawn()` / `kill(grace_seconds=5.0)` /
+    `title()`)+ 跨平台 `_pid_alive` / `_safe_kill` helper
+  - 每个 backend 的 `available()` probe 走静态探测(tmux
+    `which tmux` / iTerm2 AppleScript / Windows Terminal `where wt.exe`),
+    失败返 `False`,由 `BackendManager.detect_available_backends`
+    并行探 + 缓存
+
+- **BackendManager**(`baozicode/teams/backend_manager.py`)
+  - `detect_available_backends() -> dict[BackendType, bool]` —
+    4 个 probe 并行 + 缓存,coroutine 永远 True
+  - `effective_backend(member) -> BackendType` — 决策树:显式
+    `pane-*` 强用(healthy 才 spawn,否则降级 coroutine)/ 显式
+    `worktree-coroutine` 保留 / 默认 `coroutine` + pane 健康
+    按 sys.platform 升级(Windows → pane-windows-terminal /
+    macOS → pane-iterm2 / Linux → pane-tmux)/ pane 全不可用
+    仍走 coroutine
+  - `spawn_if_offline(team, member) -> BackendHandle` — 同
+    (team, member) asyncio.Lock dedup,锁内二次检查;失败 fallback
+    到 coroutine + log warn;写 state.json(idle + backend_pid)+
+    pane_info.json 持久化;spawn 失败不抛
+  - `is_alive(team, member)` / `kill(team, member, *,
+    reason="", grace_seconds=5.0)` — handle.kill 走 SIGTERM →
+    5s grace → SIGKILL 链;写 state=offline + pane_info entry
+    清 pid(标识已 kill)
+  - `restore_panes(team) -> int` — Lead 启动时扫 pane_info.json,
+    活 pane hydrate `_RestoredHandle`,死 pane 移除 entry + log info
+  - `cleanup_team(team)` — team destroy 触发,杀掉所有 member +
+    删 pane_info.json
+  - `member_run_command` 默认 `[sys.argv[0], "member", "run",
+    "--team", "{team}", "--name", "{name}"]` — 由 BackendManager
+    spawn 时替换占位
+
+- **pane_info.json 持久化**(`baozicode/teams/pane_info.py`)
+  - `PaneInfo` frozen dataclass(`schema_version="1.0"` / `team` /
+    `members: dict[member_name, PaneMemberInfo]`)
+  - `PaneMemberInfo`(`backend_type` / `pane_identifier` /
+    `pid` / `last_active_ts: datetime`)
+  - 原子写:`PaneInfo.save(path)` 走 write-then-rename;`PaneInfo.load(path)`
+    FileNotFoundError 返 None;`PaneInfo.empty(team)` 空 schema
+  - 文件位置:`<teams_dir>/<team>/pane_info.json`(跨 Lead
+    restart 持久,on_unmount 不清理)
+
+- **MemberAgent + MailboxLayer**(`baozicode/teams/member_agent.py`)
+  - 构造 role='member' Agent + 7 工具子集(无 team_* + 无
+    write/edit — foundation 阶段 member 只读 inbox 处理任务)
+  - `MailboxLayer` 内部用 `Mailbox` staticmethod 读写 inbox/outbox,
+    不暴露为 Tool(Member Agent 不知道 mailbox 存在)
+  - 每轮 fresh Agent(无 conversation history 跨 turn 持久 —
+    每个 inbox message 走独立 fresh conversation)
+
+- **MemberMainLoop**(`baozicode/teams/member_loop.py`)
+  - `wait_for_wake(poll_interval=0.2)` 轮询 `wake.signal` mtime,
+    async 200ms tick
+  - `_run_turn(agent, msgs)` 订阅 agent events,把 tool 侧发出
+    的 mailbox write 自动转 outbox.append_message(`TASK-COMPLETE` /
+    `TASK-FAILED` 由 MailboxNotifier 解析)
+  - 异常不挂 turn — try/except + state=idle + 继续下一轮 wait
+  - `request_terminate()` 优雅退出 → state=offline + return
+  - SIGINT/SIGTERM 由 `baozicode member run` CLI 装
+    `loop.add_signal_handler` → `loop.request_terminate()`
+
+- **`baozicode member run` CLI**(`baozicode/teams/cli.py`)
+  - 顶层 `member` 子命令 + `run` 子命令:`--team` 必填 /
+    `--name` 必填 / `--cwd` optional
+  - 流程:bootstrap registry(team 不存在 → exit 3)→ 拿
+    team + member(member 不存在 → exit 6)→ chdir 到 `--cwd`
+    或 `member.workdir` → bootstrap config + LLM + permissions →
+    构造 MemberMainLoop → 注册 signal handler → `await loop.run()`
+  - 退出码:0=graceful / 3=team 不存在 / 6=member 不存在 /
+    4=IO / 5=config / 2=argparse
+
+- **team-tools spawn 钩子**(`baozicode/teams/tools.py`)
+  - `execute_team_dispatch` 末尾调 `await backend_manager.spawn_if_offline(team, member)`,
+    返回 content 含 `backend=<type>` 片段
+  - `execute_team_cancel(terminate=True)` 改走 `await backend_manager.kill(team, member, grace_seconds=5.0)`,
+    替代 v1-4-team-tools 阶段的裸 `os.kill(state.backend_pid, SIGTERM)`
+  - `register_team_tools(... *, backend_manager=None)` 接
+    backend_manager kwarg;None 时跳过 spawn/kill(v1-4-team-tools
+    阶段行为,foundation 兼容)
+
+- **App 接线**(`baozicode/app.py`)
+  - `BaoZiCodeApp.__init__` 加 `self.backend_manager: Any = None`
+  - `_build_teams_registry` 末尾调 `self._ensure_backend_manager()`
+    构造 BackendManager singleton
+  - `_register_team_tools_sync` 把 `self.backend_manager` 注入
+    `register_team_tools` 闭包 → 6 个 team_* tool 的 executor
+    自动拿到引用
+  - `use_team(name)` 不重建 backend_manager(跨 Lead restart 持久)
+  - `on_unmount` 丢 `self.backend_manager` 引用但 pane_info.json
+    持久,下次启动 `restore_panes` hydrate
+
+### 配置
+
+无需新配置块;`member.backend` 字段接受新 5 个 BackendType
+literal(`pane-tmux` / `pane-iterm2` / `pane-windows-terminal` /
+`coroutine` / `worktree-coroutine`),`BackendType` Literal 已
+在 schema 扩展。
+
+### 破坏性变更
+
+**无** — `team_dispatch` / `team_cancel` / `team_*` 工具对
+LLM 暴露的契约不变;`register_team_tools` 新增 keyword-only
+`backend_manager=None` 参数,旧调用点零修改。
+
+### 后续 proposal(本段**不**实现)
+
+- **v1-4-team-coordinator** — `teams.coordinator.enabled` +
+  `BAOZICODE_COORDINATOR=1` 双锁 + 工具白名单收缩到「只读 +
+  shell + team_*」(本段 `role='coordinator'` 已落地,
+  coordinator 专属工具白名单由本 proposal 加)
+
+详细迁移 + BackendType 选型 + spawn / wake / resume 时序 +
+CLI 调用 + 测试覆盖见 `docs/migrations/v1.4-tools-to-v1.4-pane-backend.md`。
+
 ## [v1.4] — 2026-07 (Foundation)
 
 ### 新增能力

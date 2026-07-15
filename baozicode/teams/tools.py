@@ -31,6 +31,7 @@ from typing import Any
 from baozicode.tools.base import ToolDefinition, ToolResult
 from baozicode.tools.registry import ToolRegistry
 
+from .backend_manager import BackendManager
 from .mailbox import Mailbox
 from .merge import run_team_merge
 from .registry import TeamsRegistry
@@ -44,6 +45,9 @@ from .schema import (
 from .tasks import Task, TaskCycleError, Tasks
 
 log = logging.getLogger(__name__)
+
+# Type alias for backend_manager kwarg(可注入,默认 None 跳过 spawn)
+_BackendManagerT = BackendManager | None
 
 
 # ---------------------------------------------------------------------------
@@ -82,13 +86,17 @@ async def execute_team_dispatch(
     *,
     teams_registry: TeamsRegistry,
     project_root: Path,
+    backend_manager: _BackendManagerT = None,
 ) -> ToolResult:
-    """派一个 task 给 member:写 inbox + touch wake + 标 task in_progress。
+    """派一个 task 给 member:写 inbox + touch wake + 标 task in_progress +
+    (可选)触发 spawn。
 
     Args:
         args: `{team, member, task_id?, body?}` —— team/member 必填;
             task_id 可选(若空则不发任务关联,只发 body 文本);
             body 可选(若 task_id 有则默认 "task=<task_id>"
+        backend_manager: 可选 — 注入则末尾调 `spawn_if_offline`,
+            派生 member pane/coroutine;为 None 时跳过(foundation 阶段)。
     """
     team_name = args.get("team")
     member_name = args.get("member")
@@ -138,9 +146,22 @@ async def execute_team_dispatch(
                 e,
             )
 
+    # 触发 spawn(若 backend_manager 注入)
+    backend_type_str = ""
+    if backend_manager is not None:
+        try:
+            handle = await backend_manager.spawn_if_offline(team.name, member)
+            backend_type_str = handle.backend_type
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "team_dispatch: spawn_if_offline %s/%s 失败: %s",
+                team.name, member.name, e,
+            )
+
+    suffix = f" backend={backend_type_str}" if backend_type_str else ""
     return ToolResult.success(
         "",
-        f"dispatched {member.name} task={task_id or '(no task)'}",
+        f"dispatched {member.name} task={task_id or '(no task)'}{suffix}",
     )
 
 
@@ -201,12 +222,17 @@ async def execute_team_cancel(
     *,
     teams_registry: TeamsRegistry,
     project_root: Path,
+    backend_manager: _BackendManagerT = None,
 ) -> ToolResult:
     """取消 member 的当前任务(terminate=False)或强杀后端(terminate=True)。
 
     Args:
         args: `{team, member, reason?, terminate=false}` — team/member
             必填;reason 可选;terminate 默认 False
+        backend_manager: 可选 — 注入则 terminate=True 时走
+            `backend_manager.kill(..., grace_seconds=5.0)` 优雅杀后端
+            (优先 pane 句柄);为 None 时 fallback 走裸 `os.kill(pid, SIGTERM)`
+            (v1-4-team-tools 阶段行为)。
     """
     team_name = args.get("team")
     member_name = args.get("member")
@@ -259,9 +285,21 @@ async def execute_team_cancel(
             backend_pid=state.backend_pid,
         )
         Mailbox.write_state(member_dir, new_state)
-        # backend kill — pane-backend proposal 实现;
-        # foundation / tools 阶段若 backend_pid 存在则尝试 kill
-        if state.backend_pid is not None:
+        # 优先走 backend_manager(优雅 kill + state cleanup + pane_info 清理);
+        # 没注入则 fallback 走裸 os.kill(state.backend_pid, SIGTERM)
+        # —— v1-4-team-tools 阶段行为,foundation 兼容保留。
+        if backend_manager is not None:
+            try:
+                await backend_manager.kill(
+                    team.name, member.name,
+                    reason=reason, grace_seconds=5.0,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "team_cancel: backend_manager.kill %s/%s 失败:%s",
+                    team.name, member.name, e,
+                )
+        elif state.backend_pid is not None:
             import os
             import signal
 
@@ -600,6 +638,8 @@ async def register_team_tools(
     tool_registry: ToolRegistry,
     teams_registry: TeamsRegistry,
     project_root: Path,
+    *,
+    backend_manager: _BackendManagerT = None,
 ) -> list[ToolDefinition]:
     """注册 6 个 team_* 工具到 tool_registry。
 
@@ -607,6 +647,10 @@ async def register_team_tools(
         tool_registry: 全局 ToolRegistry
         teams_registry: 用来在 executor 内查 team / member
         project_root: project 根目录(传 run_team_merge 用)
+        backend_manager: 可选 — 注入后:
+          - `team_dispatch` 末尾调 `spawn_if_offline` 派生 member
+          - `team_cancel(terminate=True)` 走 `backend_manager.kill()`
+          None 时 executor 跳过 spawn/kill 步骤(foundation 兼容)。
 
     Returns:
         注册的 6 个 ToolDefinition 列表
@@ -629,11 +673,13 @@ async def register_team_tools(
             args: dict[str, Any],
             *,
             _td=tool_def,
+            _bm=backend_manager,
         ) -> ToolResult:
             return await executors[_td.name](
                 args,
                 teams_registry=teams_registry,
                 project_root=project_root,
+                backend_manager=_bm,
             )
 
         try:
