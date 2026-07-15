@@ -226,7 +226,10 @@
       `README.md::Team Lead 协作段` +
       `docs/migrations/v1.4-foundation-to-v1.4-tools.md` +
       `config.example.yaml::coordinator / pane_backend reserved`
-- [ ] 9.4 `git commit -m "feat(v1.4-tools): 6 team collaboration tools +
-      task DAG + approval protocol + role-based tool filter"`
+- [x] 9.4 `git commit -m "feat(v1.4-tools): 6 team collaboration tools +
+      task DAG + approval protocol + role-based tool filter"` —
+      实际 commit hash `a8e34e4`,前一条 `8269b25` 是顺手 commit 的
+      `chore(openspec): archive v1-4-team-foundation`(在 v1.4-tools commit
+      之前先把 foundation working change 收尾,免 staging 杂糅)
 - [ ] 9.5 `openspec archive v1-4-team-tools`(specs 合并到
       `openspec/specs/team-management/` + `openspec/specs/tool-calling/`)
