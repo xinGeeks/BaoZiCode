@@ -229,8 +229,36 @@ v1.4 分 **4 个独立 proposal + 独立 archive** 推进:
     `_build_teams_registry` 末尾 `_ensure_backend_manager()` 构造 singleton;
     `register_team_tools` 接 `backend_manager` kwarg 注入闭包;
     `use_team` 不重建 / `on_unmount` 不清理(panes 跨 Lead restart 持久)
-- **v1-4-team-coordinator** (后续) — 双锁开关(配置 `teams.coordinator.enabled`
-  + 环境变量 `BAOZICODE_COORDINATOR=1`)+ 剥夺写文件工具
+- **`v1-4-team-coordinator`** (本段 — 已完成) — 在 foundation + tools +
+  pane-backend 之上,落地 Coordinator 监督者模式(三锁门 + 写类工具
+  剔除 + active_role 接线):
+  - **三锁门**(`baozicode/teams/coordinator.py`)
+    `coordinator_enabled(config, team)` + `check_coordinator_locks(config, team)`;
+    三锁 = 配置 `teams.coordinator.enabled` + 环境变量
+    `BAOZICODE_COORDINATOR`(truthy,大小写不敏感)+ `team.coordinator=True`;
+    整 `TeamsConfig.coordinator` 块省略视为未启用
+  - **Schema 扩展**(`baozicode/teams/schema.py`)
+    `Team.coordinator: bool = False`(默认 False 向后兼容,旧 team.json
+    缺字段 `from_dict` 默认 False)+ `TeamsConfig.coordinator: CoordinatorConfig | None`
+  - **ToolRegistry coordinator 角色过滤**
+    (`baozicode/tools/registry.py`)
+    `get_all_tools(role='coordinator')` 显式剔除 `Write` / `Edit` /
+    `Bash`(写类工具),`tool_type='internal'` 工具(`load_skill` /
+    `task`)不受剔除;6 个 `team_*` 工具 `role_visibility` 从 `['lead']`
+    扩展到 `['lead', 'coordinator']`
+  - **App 接线**(`baozicode/app.py`)
+    `App.active_role: str = "subagent"` + `App.active_coordinator: bool` 字段;
+    `use_team(name, *, coordinator=False)` keyword-only kwarg,三锁
+    命中 → `active_role='coordinator'`,不命中 → 降级 Lead + stderr
+    报告哪一锁缺失
+  - **ChatScreen active_role**(`baozicode/tui/chat_screen.py`)
+    重建 Agent 时读 `app.active_role`(优先)决定 `role` kwarg,
+    fallback 到 `active_team_name` 推断
+  - **CLI `team use --coordinator`**(`baozicode/teams/cli.py`)
+    `--coordinator` store_true flag;三锁检查 + 降级报告 + 退出码
+    0/3/5
+  - **Coordinator 读 member outbox** — 现有 `Read` tool 即可,
+    `v0.5` L2 PathSandbox 已白名单 teams 路径
 
 **v1.4 explore 锁定的 12 个决策**(所有后续 proposal 引用):
 
@@ -375,16 +403,32 @@ baozicode/
 │       ├── commit/         # shared + Bash/Read
 │       ├── review/         # independent + Bash/Read/Grep + history-bubbles=3
 │       └── test/           # independent + Bash + history-bubbles=2
-├── teams/                  # v1.4 Team Foundation — Team 数据层 + Mailbox + Lockfile + CLI
+├── teams/                  # v1.4 Team Foundation + Tools + Pane Backend + Coordinator
 │   ├── schema.py           # Team / Member / Message / MemberState frozen dataclass
 │   │                        #   + TeamNameValidator(严格校验)+ BackendType Literal + 8 错误枚举
+│   │                        #   + Team.coordinator: bool(v1-4-team-coordinator)
 │   ├── mailbox.py          # Mailbox.append_message 原子 5 步协议 + read/write state + touch/await wake
 │   ├── lockfile.py         # mailbox_lock(path, *, timeout, stale_seconds) 跨平台
 │   │                        #   (POSIX fcntl.flock / Windows msvcrt.locking)+ 50ms 退避 + 30s 偷锁
 │   ├── store.py            # TeamStore.create/load/from_name/show/add_member/destroy
 │   ├── registry.py         # TeamsRegistry.bootstrap(config) + list_teams/get/create_team/delete_team
 │   ├── cli.py              # add_subcommand(subparsers) + main(argv) — 5 子命令(create/list/show/use/destroy)
-│   └── __init__.py         # 公开 API re-export(Team / Member / Mailbox / mailbox_lock / TeamsRegistry / TeamStore / 错误枚举)
+│   │                        #   + use --coordinator flag(v1-4-team-coordinator)
+│   ├── coordinator.py      # v1-4-team-coordinator:coordinator_enabled / check_coordinator_locks
+│   ├── tasks.py            # v1-4-team-tools:Tasks append/read_all/update_status/find_ready/detect_cycles
+│   ├── tools.py            # v1-4-team-tools:6 个 Lead-only team_* 协作工具(role_visibility=['lead','coordinator'])
+│   ├── approval.py         # v1-4-team-tools:ApprovalProtocol.parse_plan / send_approval / is_task_complete
+│   ├── mailbox_notifier.py # v1-4-team-tools:MailboxNotifier.build_reminder() 每轮扫 member outbox
+│   ├── merge.py            # v1-4-team-tools:run_team_merge(project_root, team, target) 顺序合 worktree
+│   ├── pane.py             # v1-4-team-pane-backend:5 BackendType + BackendHandle Protocol
+│   ├── backend_manager.py  # v1-4-team-pane-backend:BackendManager 居中调度 spawn/kill/restore
+│   ├── pane_info.py        # v1-4-team-pane-backend:PaneInfo / PaneMemberInfo 持久化
+│   ├── member_agent.py     # v1-4-team-pane-backend:build_member_agent + MailboxLayer
+│   ├── member_loop.py      # v1-4-team-pane-backend:MemberMainLoop 长生命周期 polling
+│   └── __init__.py         # 公开 API re-export(Team / Member / Mailbox / mailbox_lock / TeamsRegistry /
+│                            #   TeamStore / BackendManager / 错误枚举 / coordinator_enabled /
+│                            #   check_coordinator_locks / MailboxNotifier / ApprovalProtocol /
+│                            #   run_team_merge / Tasks / Task / register_team_tools 等)
 ├── conversation/
 │   └── manager.py          # 多轮历史(add_turn snapshot 重建,add_tool_result,set_archiver v0.8)
 └── config/

@@ -353,6 +353,9 @@ class Team:
     - `created_at` — UTC datetime
     - `members` — `{member_name: Member}`(member 名唯一)
     - `metadata` — 自由扩展(json-safe)
+    - `coordinator` — 是否启用 coordinator 模式(默认 False)
+      三锁全命中才真正生效(`coordinator_enabled(config, team)`),
+      缺一即降级到 Lead 路径
     """
 
     name: str
@@ -362,6 +365,7 @@ class Team:
     )
     members: dict[str, Member] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    coordinator: bool = False
 
     def __post_init__(self) -> None:
         TeamNameValidator.validate(self.name)
@@ -396,6 +400,11 @@ class Team:
             raise ValueError(
                 f"Team.metadata 必须是 dict,得到 {type(self.metadata).__name__}"
             )
+        # coordinator 必须是 bool
+        if not isinstance(self.coordinator, bool):
+            raise ValueError(
+                f"Team.coordinator 必须是 bool,得到 {type(self.coordinator).__name__}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """转 JSON-serializable dict(写入 team.json)。"""
@@ -408,6 +417,7 @@ class Team:
                 mname: m.to_dict() for mname, m in self.members.items()
             },
             "metadata": dict(self.metadata),
+            "coordinator": self.coordinator,
         }
 
     @classmethod
@@ -460,6 +470,7 @@ class Team:
             created_at=created,
             members=members,
             metadata=dict(metadata),
+            coordinator=bool(data.get("coordinator", False)),
         )
 
     def to_json(self, *, indent: int | None = 2) -> str:

@@ -326,6 +326,71 @@ LLM 暴露的契约不变;`register_team_tools` 新增 keyword-only
 详细迁移 + BackendType 选型 + spawn / wake / resume 时序 +
 CLI 调用 + 测试覆盖见 `docs/migrations/v1.4-tools-to-v1.4-pane-backend.md`。
 
+## [v1.4] — 2026-07 (Coordinator)
+
+v1-4-team-coordinator 段在 foundation + tools + pane-backend 之上落地
+**Coordinator 监督者模式** — 通过三锁门(配置 + 环境变量 +
+`team.json.coordinator`)启用,Lead Agent 自动收敛到只读工具 + 6 个
+team_* 协作工具,在多 team / 多 Lead 场景下保证「Lead 只负责指派,
+不动文件;写动作由 member 完成」。
+
+### 新增能力
+
+- **三锁门**(`baozicode/teams/coordinator.py`)
+  - `coordinator_enabled(config, team) -> bool` — 三锁全命中才返 True:
+    配置 `teams.coordinator.enabled` + `os.environ[env_var]` 是
+    truthy(`1`/`true`/`yes` 大小写不敏感)+ `team.coordinator=True`
+  - `check_coordinator_locks(config, team) -> list[str]` — 返缺失锁
+    列表(给 stderr 报告用)
+  - 默认 `env_var = "BAOZICODE_COORDINATOR"`,可配置覆盖
+  - `TeamsConfig.coordinator: CoordinatorConfig | None` — 整块省略视为
+    未启用
+
+- **Schema 扩展**
+  - `Team.coordinator: bool = False` 字段(默认 False 向后兼容,旧
+    team.json 无字段 → `from_dict` 默认 False)
+  - `TeamsRegistry.create_team(..., coordinator=False)` kwarg
+  - `TeamStore.create` + `add_member` 同步透传 `coordinator` 字段
+  - `Team.to_dict()` 输出 `"coordinator": true/false`
+
+- **ToolRegistry coordinator 角色过滤**
+  (`baozicode/tools/registry.py`)
+  - `get_all_tools(role='coordinator')` 显式剔除 `Write` / `Edit` /
+    `Bash`(写类工具),不论其 `role_visibility`
+  - `tool_type='internal'`(`load_skill` / `task`)不受 coordinator
+    剔除影响,仍可见
+  - 6 个 `team_*` 工具的 `role_visibility` 从 `['lead']` 扩展到
+    `['lead', 'coordinator']`,coordinator 可调
+
+- **App 接线**(`baozicode/app.py`)
+  - `App.active_role: str = "subagent"` + `App.active_coordinator:
+    bool = False` 新字段
+  - `use_team(name, *, coordinator=False)` keyword-only kwarg;三锁
+    命中 → `active_role='coordinator'` + `active_coordinator=True`;
+    不命中 → 降级 Lead + stderr 报告哪一锁缺失
+  - `ChatScreen` 重建 Agent 时读 `app.active_role`(优先)决定 `role`
+    kwarg,fallback 到 `active_team_name` 推断
+
+- **CLI `team use --coordinator`**(`baozicode/teams/cli.py`)
+  - `--coordinator` flag(store_true);不传 → 现有 Lead 路径
+  - 传 → 走三锁门检查 + 降级报告 + `mode=coordinator` 或 `mode=lead`
+    输出
+  - 退出码:0(成功)/ 3(team 不存在)/ 5(config 错误)
+
+- **Coordinator 读 member outbox** — 用现有 `Read` tool 即可,不需要
+  新工具。`v0.5` L2 PathSandbox 已白名单 teams 路径(`v1-4-pane-backend`
+  已加),Coordinator 自然能扫 member 进度。
+
+### 测试覆盖
+
+`+107` 个新测试(`tests/test_teams_v14_team_coordinator_field.py`
+~25 / `tests/test_teams_v14_coordinator_gate.py` ~27 /
+`tests/test_tools_role_coordinator.py` ~22 /
+`tests/test_teams_v14_app_coordinator.py` ~9 /
+`tests/test_tui_chat_screen_coordinator.py` ~9 /
+`tests/test_teams_v14_team_use_coordinator.py` ~10 /
+`tests/integration/test_team_coordinator_e2e.py` ~5)。
+
 ## [v1.4] — 2026-07 (Foundation)
 
 ### 新增能力

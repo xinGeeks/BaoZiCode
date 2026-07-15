@@ -67,14 +67,23 @@ class ToolRegistry:
           只返 `tool.role_visibility is None` 或 `role in
           tool.role_visibility` 的工具;Lead 才看得到 team_*,member /
           subagent 看不到。
+        - v1-4-team-coordinator:`role='coordinator'` 额外显式剔除
+          Write/Edit/Bash(写类工具),不论其 role_visibility;
+          `load_skill` / `task`(`tool_type='internal'`) 不受影响。
         """
         all_tools = list(self._builtin_tools) + list(self._mcp_tools.values())
         if role is None:
             return all_tools
-        return [
+        result = [
             t for t in all_tools
             if t.role_visibility is None or role in t.role_visibility
         ]
+        if role == "coordinator":
+            return [
+                t for t in result
+                if t.name not in {"Write", "Edit", "Bash"}
+            ]
+        return result
 
     def get_tool(self, name: str) -> ToolDefinition | None:
         for t in self._builtin_tools:

@@ -1015,6 +1015,87 @@ Tools registry  →  7 个 ToolDefinition(side_effect) + execute()
 模型 SDK 类型不出 `baozicode/llm/`;Textual 类型不出 `baozicode/tui/`。
 Agent Loop 是异步生成器,TUI 只是 consumer — Agent 完全可以被 headless 脚本驱动。
 
+## Coordinator Mode(v1.4 Team Coordinator)
+
+在多 team / 多 Lead 协作场景下,Lead Agent 的写文件工具
+(`Write` / `Edit` / `Bash`)风险过大 — Lead 误改文件可能覆盖
+member 已完成的工作。**Coordinator 模式** 限制 Lead 的写类工具,
+只留观察 + 协作能力,由 member 完成实际写动作。这是 v1.4 的第 4 个
+proposal(`v1-4-team-coordinator`)。
+
+### 三锁门
+
+启用 coordinator 需要**三处都设**:
+
+1. **配置层** `config.yaml`:
+   ```yaml
+   teams:
+     coordinator:
+       enabled: true
+       env_var: BAOZICODE_COORDINATOR  # 可覆盖
+       allowed_tools:                   # 可覆盖,默认 Read/Grep/Glob/WebFetch + 6 team_*
+         - Read
+         - Grep
+         - Glob
+         - WebFetch
+         - team_dispatch
+         - team_send_message
+         - team_cancel
+         - team_merge
+         - team_task_create
+         - team_task_query
+   ```
+2. **环境变量** truthy:`BAOZICODE_COORDINATOR=1`(大小写不敏感,
+   `1` / `true` / `yes` 都算)
+3. **team 意图** `team.json` 含 `"coordinator": true`:
+   ```bash
+   baozicode team create devops --coordinator  # 推荐
+   # 或手动编辑 team.json:
+   # {"schema_version": "1.0", "name": "devops", "coordinator": true, ...}
+   ```
+
+任一锁缺失 → 走现有 Lead 路径 + stderr 报告具体缺哪个。
+
+### 激活
+
+```bash
+BAOZICODE_COORDINATOR=1 baozicode team use --coordinator devops
+# 或已有 team + 配了 env:var:
+baozicode team use --coordinator devops
+# 不传 → 现有 Lead 路径:
+baozicode team use devops
+```
+
+### 工具白名单
+
+| role | 看到的工具 |
+|------|----------|
+| `subagent`(无 team)| 7 内置 |
+| `member`(v1-4-pane-backend)| 7 内置 |
+| `lead`(默认 `team use`)| 7 内置 + 6 个 `team_*` |
+| `coordinator`(`team use --coordinator`)| Read / Grep / Glob / WebFetch + 6 个 `team_*`(Write/Edit/Bash 剔除)|
+
+`tool_type='internal'` 的工具(`load_skill` / `task`)对所有 role
+可见,不受 coordinator 剔除影响。
+
+### Coordinator 读 member 进度
+
+Coordinator Agent 用现有 `Read` tool 直接读
+`<teams_dir>/<team>/<member>/outbox.jsonl`,不需要新工具 —
+`v0.5` L2 PathSandbox 已白名单 teams 路径(`v1-4-pane-backend` 加的)。
+
+### Out of Scope
+
+- **Member 端工具白名单** — member 已用 7 工具子集(`role='member'`)
+  收窄,coordinator 不再触动
+- **审计日志** — Coordinator 操作可审计但本 proposal 不做(留 v2.0)
+- **多 coordinator 协作** — 一个 active team 只有一个 coordinator
+- **运行时动态切换** — 切 coordinator 后,需 `team use`(不带
+  `--coordinator`)退出
+
+详细三锁门 + 降级策略 + App 接线 + 测试覆盖见
+`docs/migrations/v1.4-pane-backend-to-v1.4-coordinator.md`。
+
 ## License
 
 MIT

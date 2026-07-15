@@ -509,13 +509,25 @@ teams:
   # (后续 coordinator proposal 才会引入 project-scope 子目录区分)。
   dir: ~/.config/baozicode/teams/
 
-  # ── reserved for v1-4-team-coordinator ─────────────────────────
+  # ── v1-4-team-coordinator — Coordinator 监督者模式(三锁门)─────
+  # 三锁全命中才生效(三锁: 配置 enabled + 环境变量 truthy +
+  # team.json 含 `"coordinator": true`):
+  #   $ export BAOZICODE_COORDINATOR=1
+  #   $ baozicode team create devops --coordinator
+  #   $ baozicode team use --coordinator devops
+  # 任一锁缺失 → 降级 Lead + stderr 报告。
   # coordinator:
-  #   enabled: false                    # 能力开关(配置层)。必须同时设
-  #                                    # BAOZICODE_COORDINATOR=1 环境变量
-  #                                    # 才生效(双锁机制)。
-  #   allow_write_tools: false          # 开启后 Lead 默认被剥夺 Write/Edit/Bash
-  #                                    # 以外的写类工具;只留 Read/Grep/Glob/
-  #                                    # WebFetch + team_* 协作工具。
-  #                                    # (v1-4-team-coordinator 实现)
+  #   enabled: false                    # 锁 1: 配置层开关(默认 False)
+  #   env_var: BAOZICODE_COORDINATOR    # 锁 2: 环境变量名(可覆盖)
+  #   allowed_tools:                    # Coordinator Agent 看到的工具白名单
+  #     - Read
+  #     - Grep
+  #     - Glob
+  #     - WebFetch
+  #     - team_dispatch
+  #     - team_send_message
+  #     - team_cancel
+  #     - team_merge
+  #     - team_task_create
+  #     - team_task_query
 

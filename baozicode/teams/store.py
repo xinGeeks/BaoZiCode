@@ -61,7 +61,12 @@ class TeamStore:
 
     @classmethod
     def create(
-        cls, teams_dir: Path, name: str, *, lead: str = "lead"
+        cls,
+        teams_dir: Path,
+        name: str,
+        *,
+        lead: str = "lead",
+        coordinator: bool = False,
     ) -> TeamStore:
         """创建新 team(原子建目录 + 写 team.json)。
 
@@ -69,6 +74,8 @@ class TeamStore:
             teams_dir: `teams.dir` 配置路径
             name: team 名(TeamNameValidator)
             lead: Lead 名字,默认 `"lead"`
+            coordinator: v1-4-team-coordinator — 是否启用
+                coordinator 模式(三锁之一)。默认 False。
 
         Returns:
             TeamStore 实例
@@ -82,7 +89,7 @@ class TeamStore:
         if team_dir.exists():
             raise TeamAlreadyExists(f"team 已存在: {team_dir}")
 
-        team = Team(name=name, lead=lead)
+        team = Team(name=name, lead=lead, coordinator=coordinator)
         # 原子:mkdir + 立即写 team.json
         team_dir.mkdir(parents=True)
         try:
@@ -182,6 +189,7 @@ class TeamStore:
             created_at=team.created_at,
             members=new_members,
             metadata=team.metadata,
+            coordinator=team.coordinator,
         )
         new_team.save(self.team_dir / "team.json")
         self._team = new_team

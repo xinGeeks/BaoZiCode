@@ -152,6 +152,14 @@ class BaoZiCodeApp(App):
         # MailboxNotifier 实例(与 active_team_name 同步);每轮
         # Agent._inject_reminders 调 build_reminder() 注入 member outbox。
         self.mailbox_notifier: Any = None
+        # v1-4-team-coordinator:当前 Agent 角色 — 由 `use_team(coordinator=...)`
+        # 设置;ChatScreen 重建 Agent 时读这个字段决定 role kwarg。
+        # 取值:`"subagent"`(无 team)/ `"lead"`(team use 默认)/
+        # `"coordinator"`(team use --coordinator 三锁全命中)。
+        self.active_role: str = "subagent"
+        # v1-4-team-coordinator:active_role == "coordinator" 时为 True
+        # (给 TUI 状态栏 / 调试日志用)。
+        self.active_coordinator: bool = False
         # team 工具是否已注册到 ToolRegistry(幂等标记)
         self._team_tools_registered: bool = False
         # BackendManager —— 居中调度 5 种 pane/coroutine backend。
@@ -456,15 +464,20 @@ class BaoZiCodeApp(App):
                 type(exc).__name__, exc,
             )
 
-    def use_team(self, name: str) -> None:
+    def use_team(self, name: str, *, coordinator: bool = False) -> None:
         """v1.4 team-tools — 激活 team 为 active。
+        v1-4-team-coordinator — `coordinator=True` 走三锁门判断。
 
         设 `active_team_name` + 构造 MailboxNotifier(teams_registry,
         active_team_name)。下一次 ChatScreen 重建 Agent 时拿到
-        role='lead' + 这个 notifier。
+        role='lead'(默认)或 role='coordinator'(三锁命中)。
 
         Args:
             name: team 名(必须在 TeamsRegistry 里)
+            coordinator: v1-4-team-coordinator — True 走三锁门,
+                三锁全命中 → `active_role='coordinator'`,
+                不命中 → 降级到 `active_role='lead'` + stderr 报告
+                哪一锁缺失(由调用方读 `app.active_role` 决定)。
 
         Raises:
             ValueError: teams disabled 或 team 不存在
@@ -473,9 +486,30 @@ class BaoZiCodeApp(App):
             raise ValueError(
                 "team system 未启用(config.teams.enabled=false)"
             )
-        if self.teams.get(name) is None:
+        store = self.teams.get(name)
+        if store is None:
             raise ValueError(f"team {name!r} 不存在")
-        from baozicode.teams import MailboxNotifier
+        from baozicode.teams import MailboxNotifier, check_coordinator_locks
+
+        team = store.show()
+        if coordinator:
+            missing = check_coordinator_locks(self.config, team)
+            if missing:
+                import sys as _sys
+
+                print(
+                    f"Warning: coordinator 三锁未命中 (缺: {', '.join(missing)});"
+                    f"降级到 Lead 模式。",
+                    file=_sys.stderr,
+                )
+                self.active_role = "lead"
+                self.active_coordinator = False
+            else:
+                self.active_role = "coordinator"
+                self.active_coordinator = True
+        else:
+            self.active_role = "lead"
+            self.active_coordinator = False
 
         self.active_team_name = name
         self.mailbox_notifier = MailboxNotifier(self.teams, name)

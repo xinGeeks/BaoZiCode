@@ -79,6 +79,7 @@ from .schema import (
     fill_message_timestamp,
 )
 from .approval import ApprovalAction, ApprovalProtocol
+from .coordinator import check_coordinator_locks, coordinator_enabled
 from .mailbox_notifier import MailboxNotifier
 from .merge import run_team_merge
 from .store import TeamStore
@@ -130,6 +131,8 @@ __all__ = [
     "TeamsRegistry",
     "WorktreeCoroutineBackend",
     "build_member_agent",
+    "check_coordinator_locks",
+    "coordinator_enabled",
     "default_member_state",
     "fill_message_timestamp",
     "mailbox_lock",

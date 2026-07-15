@@ -14,6 +14,7 @@ __all__ = [
     "BackendName",
     "CommandsConfig",
     "CompactionConfig",
+    "CoordinatorConfig",
     "McpServerConfig",
     "McpServerHttpConfig",
     "McpServerStdioConfig",
@@ -314,6 +315,38 @@ class WorktreeConfig(BaseModel):
     daemon_interval_seconds: int = Field(default=60, ge=5, le=3600)
 
 
+class CoordinatorConfig(BaseModel):
+    """v1-4-team-coordinator — coordinator 模式配置层开关。
+
+    三锁门之一:`enabled=True` 是 Coordinator 模式的配置层开关
+    (还需 `os.environ[env_var]` truthy + `team.coordinator=True`)。
+    整块 `coordinator:` 在 YAML 省略 → `None`,视为未启用。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=False, description="coordinator 模式配置层开关")
+    env_var: str = Field(
+        default="BAOZICODE_COORDINATOR",
+        description="用于启用 coordinator 的环境变量名",
+    )
+    allowed_tools: list[str] = Field(
+        default_factory=lambda: [
+            "Read",
+            "Grep",
+            "Glob",
+            "WebFetch",
+            "team_dispatch",
+            "team_send_message",
+            "team_cancel",
+            "team_merge",
+            "team_task_create",
+            "team_task_query",
+        ],
+        description="coordinator 工具白名单(默认 Read/Grep/Glob/WebFetch + 6 个 team_*)",
+    )
+
+
 class TeamsConfig(BaseModel):
     """v1.4 Team Foundation — Team 系统配置。
 
@@ -322,11 +355,8 @@ class TeamsConfig(BaseModel):
     - `enabled` 总开关(False → App 不构造 TeamsRegistry,CLI `team`
       子命令仍可用 — 但仅 user-default dir)
     - `dir` teams 持久化根目录(支持 `~` 展开)
-
-    后续 proposal 会扩展:
-    - v1-4-team-pane-backend:`pane_backend` 偏好顺序
-    - v1-4-team-coordinator:`coordinator_enabled` / `coordinator_env_var` /
-      `coordinator_allowed_tools`
+    - `coordinator` v1-4-team-coordinator 子配置块
+      (`enabled / env_var / allowed_tools`)
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -335,6 +365,10 @@ class TeamsConfig(BaseModel):
     dir: Path = Field(
         default_factory=lambda: Path("~/.config/baozicode/teams/").expanduser(),
         description="team 持久化根目录;支持 ~ 展开",
+    )
+    coordinator: CoordinatorConfig | None = Field(
+        default=None,
+        description="v1-4-team-coordinator 配置块(None 表示未启用)",
     )
 
 

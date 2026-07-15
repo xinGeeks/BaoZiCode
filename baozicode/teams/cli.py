@@ -65,6 +65,7 @@ from baozicode.config.loader import ConfigError, load_config
 from baozicode.llm.factory import create_client
 from baozicode.permissions import bootstrap as perm_bootstrap
 
+from .coordinator import check_coordinator_locks
 from .member_loop import MemberMainLoop
 from .registry import TeamsRegistry
 from .schema import (
@@ -198,6 +199,12 @@ def add_subcommand(subparsers: argparse._SubParsersAction) -> None:
     )
     p_use.add_argument("name", type=str, help="team 名")
     p_use.add_argument(
+        "--coordinator",
+        action="store_true",
+        help="v1-4-team-coordinator:走 coordinator 模式(三锁门);"
+        "三锁全命中 → active_role='coordinator';不命中 → 降级 Lead",
+    )
+    p_use.add_argument(
         "--scope",
         choices=["user", "project"],
         default="user",
@@ -277,10 +284,32 @@ def _cmd_use(args: argparse.Namespace) -> int:
     if store is None:
         print(f"Error: TeamNotFound: team {args.name!r} 不存在", file=sys.stderr)
         return EXIT_NOT_FOUND
+    team = store.show()
+
+    mode = "lead"
+    if getattr(args, "coordinator", False):
+        # v1-4-team-coordinator:三锁检查 + 降级报告
+        try:
+            config = load_config(getattr(args, "config", None))
+        except Exception as exc:
+            print(f"Error: ConfigError: {exc}", file=sys.stderr)
+            return EXIT_CONFIG
+
+        missing = check_coordinator_locks(config, team)
+        if missing:
+            print(
+                f"Note: coordinator 三锁未命中 (缺: {', '.join(missing)});"
+                f"降级到 Lead 模式。",
+                file=sys.stderr,
+            )
+            mode = "lead"
+        else:
+            mode = "coordinator"
+
     member_count = len(store.list_members())
     print(
         f"Activated team {args.name!r} ({member_count} members, "
-        f"lead={store.show().lead})"
+        f"lead={team.lead}, mode={mode})"
     )
     print(
         "Note: foundation 仅打印激活信息;"

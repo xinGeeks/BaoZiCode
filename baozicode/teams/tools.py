@@ -471,7 +471,7 @@ async def execute_team_task_query(
 # ---------------------------------------------------------------------------
 
 
-_TEAM_ROLE_VISIBILITY = ["lead"]
+_TEAM_ROLE_VISIBILITY = ["lead", "coordinator"]
 
 
 def _td(name: str, description: str, parameters: dict[str, Any]) -> ToolDefinition:

@@ -1216,7 +1216,10 @@ class ChatScreen(Screen):
             # active_team_name 设了 → role='lead' 拿到 team_* 工具,
             # MailboxNotifier 每轮扫 member outbox 注 sys-reminder。
             # 否则退回 v1.3 默认(role='subagent',无 team_*, 无 mailbox)。
-            role="lead" if getattr(app, "active_team_name", None) else "subagent",
+            # v1-4-team-coordinator:`app.active_role` 优先 — 三锁命中
+            # 时为 'coordinator'(白名单工具);否则保持 'lead'(use_team 默认)。
+            role=getattr(app, "active_role", None)
+            or ("lead" if getattr(app, "active_team_name", None) else "subagent"),
             tool_registry=get_default_tool_registry(),
             mailbox_notifier=getattr(app, "mailbox_notifier", None),
         )

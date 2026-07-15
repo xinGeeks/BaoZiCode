@@ -86,9 +86,20 @@ class TeamsRegistry:
     # 写
     # ------------------------------------------------------------------
 
-    def create_team(self, name: str, *, lead: str = "lead") -> TeamStore:
-        """创建新 team(走 TeamStore.create,带唯一性约束)。"""
-        return TeamStore.create(self.teams_dir, name, lead=lead)
+    def create_team(
+        self, name: str, *, lead: str = "lead", coordinator: bool = False
+    ) -> TeamStore:
+        """创建新 team(走 TeamStore.create,带唯一性约束)。
+
+        Args:
+            name: team 名
+            lead: Lead 名字
+            coordinator: v1-4-team-coordinator — 是否启用
+                coordinator 模式(三锁之一)。默认 False(向后兼容)。
+        """
+        return TeamStore.create(
+            self.teams_dir, name, lead=lead, coordinator=coordinator
+        )
 
     def delete_team(self, name: str, *, confirm: bool = False) -> None:
         """删除 team(走 TeamStore.destroy,需 confirm=True)。"""
