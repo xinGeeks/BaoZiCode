@@ -2,6 +2,199 @@
 
 BaoZiCode 所有重要变更记录在此。版本号遵循 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。
 
+## [v1.4] — 2026-07 (Tools)
+
+team-tools 段在 v1.4 Foundation 之上落地 6 个 Lead-only 协作工具 +
+共享任务清单 + Approval 协议 + MailboxNotifier + 角色过滤。
+
+### 新增能力
+
+- **共享任务清单**(`baozicode/teams/tasks.py`)
+  - `Task` frozen dataclass:`id`(8 字符 hex 自动生成)/ `body` /
+    `status`(6 字面量 `pending` / `ready` / `in_progress` / `done` /
+    `failed` / `canceled`)/ `depends_on: tuple[str,...]` /
+    `assignee` / `created_at` / `started_at`(首次 in_progress) /
+    `completed_at`(terminal)/ `error`
+  - `Tasks.append` 写临时 + fsync + `copyfileobj` 追加 + fsync +
+    删 tmp + release 锁,锁走独立的 `<team_dir>/.tasks.lock`
+    (避免与 member inbox `.lock` 互锁);`Tasks.read_all` 0 字节 /
+    坏行跳过;`Tasks.update_status` 整文件 read-modify-replace
+    (tasks.jsonl 是 durable state 非 append-only),顺手填
+    `started_at` / `completed_at`
+  - `Tasks.find_ready` 拓扑门控(所有 deps ∈ {done, canceled}
+    才返 ready);`Tasks.detect_cycles` DFS 检测自环 / 二元环 /
+    三元环,`TaskCycleError` 在 `team_task_create` 拒绝写入
+  - `TaskCycleError` 业务异常,继承 `ValueError`
+
+- **6 个 Lead-only 协作工具**(`baozicode/teams/tools.py`)
+  - `team_dispatch(team, member, task_id?, body?)`:写 inbox +
+    `touch_wake` + 若 `task_id` 非空自动 `Tasks.update_status
+    (in_progress, assignee)` 填 `started_at`
+  - `team_send_message(team, member, body)`:写任意文本到
+    inbox;body 含 `APPROVED: <id>` / `REJECTED: <id> <reason>`
+    由 ApprovalProtocol 解析触发审批语义
+  - `team_cancel(team, member, reason?, terminate=false)`:terminate=
+    False 写 `CANCEL: <reason>` + 当前 task → `canceled`;
+    `terminate=true` 改 `state.json` → `offline` + `os.kill(
+    backend_pid, SIGTERM)`(pane-backend 没注入时 pid 为 None
+    静默 no-op)
+  - `team_merge(team, target='main', dry_run=false)`:委托
+    `run_team_merge`,字典序 `git merge --no-ff wt/<name>` 顺序合,
+    冲突 `git merge --abort` + 收集 aborted 列表
+  - `team_task_create(team, body, depends_on=[], auto_ready=true)`:
+    8 字符 hex id(`secrets.token_hex(4)`)+ cycle 检测;
+    `auto_ready=true` 时若 deps 全 satisfied 自动 `status=ready`
+  - `team_task_query(team, status_filter=[], assignee=None,
+    include_ready_graph=false)`:可选 status / assignee 过滤 +
+    `ready_for_dispatch` 布尔
+  - 6 个工具全部 `role_visibility=['lead']`;非 Lead Agent 拿不到
+  - `register_team_tools(tool_registry, teams_registry, project_root)`
+    注册入口(idempotent,撞名 ValueError 视为已注册);
+    `unregister_team_tools` 用于 `on_unmount`
+
+- **Approval 协议**(`baozicode/teams/approval.py`)
+  - 走 mailbox 文本 + `---XXX-<id>--- ... ---END---` 分隔符,
+    不引入新文件 / 新锁 / 新协议层
+  - member → Lead:`---PLAN-<8hex>--- ... ---END---`
+  - Lead → member:`APPROVED: <id>` 或 `REJECTED: <id> <reason>`
+    (`reason` 非空强制)
+  - member 完成 / 失败上报:`---TASK-COMPLETE-<task_id>--- ... ---END---`
+    / `---TASK-FAILED-<task_id>--- ... ---END---`
+  - `ApprovalProtocol.parse_plan / parse_approval / send_approval /
+    is_task_complete / is_task_failed` 5 个静态方法
+  - `send_approval(inbox_dir, plan_id, action, reason=None)`
+    封装 `Mailbox.append_message + Mailbox.touch_wake`
+
+- **MailboxNotifier**(`baozicode/teams/mailbox_notifier.py`)
+  - `MailboxNotifier(teams_registry, team_name)`,Lead Agent
+    注入到 `Agent.__init__(..., mailbox_notifier=...)`,
+    只有 `role='lead'` 触发
+  - `build_reminder() -> str | None` 每轮跑:扫所有 member
+    outbox,分类新消息 → 拼 `<system-reminder
+    type="team_mailbox">` 块
+  - 分类副作用:TASK-COMPLETE → `Tasks.update_status(done)` +
+    `Mailbox.write_state(idle)`;TASK-FAILED → `failed` 含
+    `error` 字段 + state `idle`;PLAN 进 reminder 等 Lead
+    approve / reject;普通消息截 200 字
+  - dedup:`seen_hashes: set[str] = set()`,跨 `Agent.run` 持久,
+    `hash(body + ts)` 作 key 防重提
+  - 失败容错:Notifier 抛异常 → Agent 不挂,`log warning` 继续
+
+- **team_merge git helper**(`baozicode/teams/merge.py`)
+  - `run_team_merge(project_root, team, *, target='main',
+    dry_run=False) -> dict`
+  - 步骤:`git rev-parse --show-toplevel` 校验 repo →
+    `git checkout <target>` → 字典序遍历
+    `git merge --no-ff wt/<name>` → 冲突 `git merge --abort` +
+    best-effort 收集 aborted
+  - `dry_run=True` 不调 git,只返 `{status: 'would-merge',
+    members: [...]}` 计划
+  - 非 git repo / checkout 失败 → 返 `{status: 'error',
+    error: '...'}`
+
+- **角色过滤**(扩展 `tools/base.py` + `tools/registry.py` +
+  `agent/loop.py`)
+  - `ToolDefinition.role_visibility: list[str] | None = None`
+    字段,`__post_init__` 校验 ∈ `AGENT_ROLES =
+    frozenset({'lead','member','subagent','coordinator'})`
+  - 7 个内置工具全部 `role_visibility=None`(向后兼容 v1.3)
+  - `ToolRegistry.get_all_tools(role: str | None = None)`:
+    `role=None` 走老路径返全部;非空按
+    `tool.role_visibility is None OR role in tool.role_visibility`
+    过滤
+  - `Agent.__init__` 新增 `role: Literal[...] = 'subagent'`
+    keyword-only 参数;`Agent._filter_tools_by_role` 优先用
+    `self._tool_registry.get_all_tools(role)`(registry 注入)
+    否则就地过滤
+  - `Agent.role` property 暴露外部读
+  - `tool_type='internal'` 工具(如 `load_skill`)不受 role
+    过滤影响
+
+- **App + ChatScreen 接线**(`baozicode/app.py` +
+  `baozicode/tui/chat_screen.py`)
+  - `BaoZiCodeApp.use_team(name)` 同步设 `active_team_name` +
+    构造 `MailboxNotifier`
+  - `BaoZiCodeApp.on_mount` 调 `_build_teams_registry` 自动构造
+    + `_register_team_tools_sync` 异步把 6 个 team_* 注入全局
+    `ToolRegistry`
+  - `BaoZiCodeApp.on_unmount` 调 `unregister_team_tools` + 丢
+    `teams / active_team_name / mailbox_notifier` 引用
+  - `ChatScreen` 重建 Agent 时
+    `role='lead' if app.active_team_name else 'subagent'`,
+    切工具集 + MailboxNotifier 注入由 Agent 构造完成
+
+- **配置不动**:`TeamsConfig` 与 Foundation 一致,pane_backend /
+  coordinator 配置留给后续 proposal(v1-4-team-pane-backend /
+  v1-4-team-coordinator);`config.example.yaml` 加 `coordinator:`
+  块占位 + `enabled: false` 默认
+
+### 测试覆盖
+
+- `tests/test_teams_v14_tasks.py` — 35 tests(Task 字段 /
+  JSONL 序列化 / append 原子 / read_all 坏行 / update_status
+  整文件 / find_ready 拓扑 / detect_cycles 自环 / 三元环 /
+  TaskCycleError)
+- `tests/test_teams_v14_tools.py` — 25 tests(6 工具 happy /
+  参数错误 / member 不存在 / team 不存在 / 自动 id / cycle
+  拒绝 / register 注册 / register 幂等 / 角色过滤)
+- `tests/test_teams_v14_role_visibility.py` — 18 tests(
+  role_visibility 默认 None / 合法角色接受 / 未知角色拒 /
+  `get_all_tools(role=None)` 兼容 / Lead 看到 13 / Member
+  / Subagent / Coordinator 各自过滤 / `load_skill` 走
+  `internal` 旁路 / Agent 默认 subagent / 显式 lead /
+  member / coordinator / 无效角色 ValueError / Agent
+  `_filter_tools_by_role` 集成)
+- `tests/test_teams_v14_approval.py` — 9 tests(PLAN 解析 /
+  APPROVED / REJECTED 解析 / REJECTED 缺 reason 拒 /
+  `send_approval` 写 inbox + `touch_wake` /
+  TASK-COMPLETE / TASK-FAILED 块识别)
+- `tests/test_teams_v14_merge.py` — 9 tests(单成员合 /
+  多成员合 / 冲突 abort / target checkout 失败 / 空 team /
+  `dry_run` 不调 git / `dry_run` 空 team / 非 git repo)
+- `tests/test_teams_v14_mailbox_notifier.py` — 10 tests(
+  空 team / 不存在 team / PLAN 注入 / TASK-COMPLETE 自动
+  mark done / TASK-FAILED 自动 mark failed + error 字段 /
+  dedup 第二次 build None / 多 member 同时活跃 / 普通消息
+  截 200 字)
+- `tests/test_teams_v14_agent_integration.py` — 4 tests(
+  mailbox_notifier=None 无 reminder / role=lead 注入 /
+  role=member 跳过 / notifier 抛异常 swallowed)
+- `tests/integration/test_teams_v14_e2e.py` — 7 tests(
+  全链路 Lead Agent:team use + dispatch + member fake
+  reply + MailboxNotifier 触发 + lead 决策 + team_merge
+  dry_run + cancel)
+- 共 **117 tests**,全平台通过
+
+### 无 breaking change
+
+- v1.3 + v1.4-foundation 项目升级 v1.4-tools 后:
+  - 主对话照常跑(`role='subagent'` 默认看不到 team_*,
+    行为**较 v1.3 更受限** — subagent 本就不该有 team 工具)
+  - `App.active_team_name=None` 时 Lead 角色没有激活,
+    行为等同 v1.3
+  - `baozicode team use <name>` 之后 ChatScreen 重建 Agent
+    才升级到 `role='lead'` + 13 工具
+- `ToolDefinition` 新字段 `role_visibility` 默认 `None` →
+  v1.3 老代码 / 老测试零修改
+- `ToolRegistry.get_all_tools(role=None)` 默认参数 → v1.3
+  12 个调用点零修改
+- `Agent` 新参数 `role` 默认 `'subagent'` → v1.3 老 Agent
+  构造零修改
+
+### 后续 proposal(本段**不**实现)
+
+- **v1-4-team-pane-backend** — tmux / iTerm2 / Windows Terminal
+  pane 实际派生 + watchdog wake + 从 `state.json` resume
+  (本段 `team_cancel(terminate=true)` 的 `os.kill(
+  backend_pid, SIGTERM)` 占位由 pane-backend 注入接接管)
+- **v1-4-team-coordinator** — `teams.coordinator.enabled` +
+  `BAOZICODE_COORDINATOR=1` 双锁 + 工具白名单收缩到「只读 +
+  shell + team_*」(本段 `role='coordinator'` 已落地,
+  coordinator 专属工具白名单由本 proposal 加)
+
+详细迁移 + 6 工具使用 + Approval 流 + 任务 DAG 示例 +
+测试覆盖见 `docs/migrations/v1.4-foundation-to-v1.4-tools.md`。
+
 ## [v1.4] — 2026-07 (Foundation)
 
 ### 新增能力

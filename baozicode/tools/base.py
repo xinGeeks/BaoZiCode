@@ -21,6 +21,10 @@ ExecutionStatus = Literal[
 ]
 DeniedBy = Literal["l1_blacklist", "hook_pre", "l2_l5_permission"]
 
+# v1.4:角色白名单 — Agent 在构造时指定 role,ToolRegistry 过滤可见工具。
+# 默认 None 表示全员可见;team_* 协作工具由 Lead-only 限定。
+AGENT_ROLES = frozenset({"lead", "member", "subagent", "coordinator"})
+
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +71,13 @@ class ToolDefinition:
     - "internal":系统级工具(如 `load_skill`),不受白名单约束(boot 时确保仅
       注册到 LLM 的工具集,然后永远可用)
     v0.6 之前没有此字段,所有工具默认为 None/"user"。
+
+    `role_visibility` (v1.4 新增):声明此工具对哪些 Agent 角色可见。
+    - None(默认) — 所有角色可见(向后兼容,7 个内置工具全部 None)
+    - ['lead'] — 仅 Lead Agent 可见(如 team_dispatch / team_merge)
+    - ['lead', 'coordinator'] — Lead 和未来 coordinator 都可见
+    ToolRegistry.get_all_tools(role) 按 role 过滤;role=None 时返全部
+    (老路径,v1.3 行为)。
     """
 
     name: str
@@ -76,6 +87,22 @@ class ToolDefinition:
     side_effect: bool = False
     path_args: list[str] = field(default_factory=list)
     tool_type: str | None = None  # None = "user",显式 "internal" = 系统级豁免
+    role_visibility: list[str] | None = None  # None = 全员可见;list = 受限角色
+
+    def __post_init__(self) -> None:
+        # role_visibility 校验:None 透传;list 必须是已知角色子集
+        if self.role_visibility is not None:
+            if not isinstance(self.role_visibility, list):
+                raise ValueError(
+                    f"ToolDefinition.role_visibility 必须是 list 或 None,"
+                    f" 得到 {type(self.role_visibility).__name__}"
+                )
+            invalid = [r for r in self.role_visibility if r not in AGENT_ROLES]
+            if invalid:
+                raise ValueError(
+                    f"ToolDefinition.role_visibility 含未知角色 {invalid!r};"
+                    f" permitted: {sorted(AGENT_ROLES)}"
+                )
 
     def to_anthropic(self) -> dict[str, Any]:
         """转换为 Anthropic SDK 的 tool 格式。"""
@@ -161,6 +188,7 @@ class ToolResult:
 
 
 __all__ = [
+    "AGENT_ROLES",
     "DeniedBy",
     "ExecutionStatus",
     "Risk",

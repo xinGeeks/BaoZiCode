@@ -42,8 +42,8 @@ from baozicode.permissions.engine import RuleEngine
 from baozicode.permissions.types import MergedPermissions, PermissionMode
 from baozicode.prompt import PromptBuilder, PlanModeReminder
 from baozicode.prompt.types import BuiltPrompt
-from baozicode.tools.base import ToolCall, ToolDefinition, ToolResult
-from baozicode.tools.registry import execute_tool_call
+from baozicode.tools.base import AGENT_ROLES, ToolCall, ToolDefinition, ToolResult
+from baozicode.tools.registry import execute_tool_call, get_default_tool_registry
 
 PermissionCallback = Callable[[ToolCall], Awaitable[bool]]
 
@@ -152,9 +152,19 @@ class Agent:
         hook_dispatcher: "Any | None" = None,
         subagent_manager: "Any | None" = None,
         subagent_meta: "Any | None" = None,
+        role: Literal["lead", "member", "subagent", "coordinator"] = "subagent",
+        tool_registry: "Any | None" = None,
+        mailbox_notifier: "Any | None" = None,
     ) -> None:
         if config is None:
             raise ValueError("Agent requires AppConfig in v0.4+")
+        # v1.4:role 白名单校验
+        if role not in AGENT_ROLES:
+            raise ValueError(
+                f"Agent.role 非法 {role!r};permitted: {sorted(AGENT_ROLES)}"
+            )
+        self._role: str = role
+        self._tool_registry = tool_registry
         self._llm = llm_client
         self._all_tools = tools
         self._conversation = conversation
@@ -206,6 +216,10 @@ class Agent:
         # v1.2: 主 Agent run 期间的 in-flight 标志(SubAgentManager 用它判断
         # 结果走 idle=user message 还是 busy=reminder)
         self._is_running: bool = False
+        # v1.4:MailboxNotifier — Lead Agent 在每轮 _inject_reminders
+        # 调 notifier.build_reminder() 把 member outbox 转 system-reminder。
+        # 只对 role='lead' 有意义(其他 role 不应触发);None 时跳过整层。
+        self._mailbox_notifier: Any = mailbox_notifier
         # v0.8: 两层 memory index — bootstrap 后立即读出 index 文本,灌进
         # PromptBuilder 让 LLM 在每轮请求前就知道已有笔记,避免重复 add。
         memory_index_user, memory_index_project = _read_memory_indices(
@@ -217,10 +231,14 @@ class Agent:
         agent_registry = None
         if subagent_manager is not None and subagent_meta is None:
             agent_registry = getattr(subagent_manager, 'registry', None)
+        # v1.4:role 过滤 — 拿 tool_registry(若传入)按 role 过滤;若未传
+        # registry 但有 self._role,直接在传入的 tools 上做轻量过滤。
+        visible_tools = self._filter_tools_by_role(tools)
+        self._visible_tools: list[ToolDefinition] = visible_tools
         self._prompt: BuiltPrompt = PromptBuilder().build(
             self._config,
             plan_mode=self._plan_mode,
-            tools=self._all_tools,
+            tools=visible_tools,
             instructions_text=instructions_text,
             memory_index_user=memory_index_user,
             memory_index_project=memory_index_project,
@@ -292,6 +310,33 @@ class Agent:
         所以这里直接返回即可。
         """
         return list(self._prompt.augmented_tools)
+
+    @property
+    def role(self) -> str:
+        """v1.4: Agent 角色('lead' / 'member' / 'subagent' / 'coordinator')。
+
+        供外部(TUI / 测试)读;不可写(构造时确定)。
+        """
+        return self._role
+
+    def _filter_tools_by_role(
+        self, tools: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
+        """v1.4: 按 self._role 过滤工具列表。
+
+        - 优先用 self._tool_registry.get_all_tools(role)(若传入)—
+          这是 v1.4 推荐路径,registry 是唯一可信源
+        - 否则在传入的 tools 上就地过滤(向后兼容没传 registry 的调用方)
+        - role=None 的工具(默认)对所有角色可见
+        """
+        if self._tool_registry is not None:
+            get_all = getattr(self._tool_registry, "get_all_tools", None)
+            if callable(get_all):
+                return list(get_all(role=self._role))
+        return [
+            t for t in tools
+            if t.role_visibility is None or self._role in t.role_visibility
+        ]
 
     @property
     def plan_mode(self) -> bool:
@@ -407,7 +452,20 @@ class Agent:
                     sticky.append(r)
             self._pending_reminders = sticky
 
-        # 5) v1.1.1: hook prompt slot=temp — 一次性消费,append 后立即清空
+        # 5) v1.4: mailbox reminder — Lead Agent 每轮扫 member outbox
+        # (MailboxNotifier 内部 dedup);只对 role='lead' 触发。
+        if self._mailbox_notifier is not None and self._role == "lead":
+            try:
+                mailbox_block = self._mailbox_notifier.build_reminder()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("MailboxNotifier.build_reminder 失败: %s", exc)
+                mailbox_block = None
+            if mailbox_block:
+                reminders.append(
+                    Message(role="user", content=mailbox_block)
+                )
+
+        # 6) v1.1.1: hook prompt slot=temp — 一次性消费,append 后立即清空
         if self._temp_reminders:
             for body in self._temp_reminders:
                 reminders.append(

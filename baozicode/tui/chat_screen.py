@@ -1212,6 +1212,13 @@ class ChatScreen(Screen):
             # sub-Agent 不传 → _subagent_meta 区分)
             subagent_manager=getattr(app, "subagents", None),
             subagent_meta=None,  # 主 Agent 没有 subagent_meta
+            # v1.4:role + tool_registry + mailbox_notifier —
+            # active_team_name 设了 → role='lead' 拿到 team_* 工具,
+            # MailboxNotifier 每轮扫 member outbox 注 sys-reminder。
+            # 否则退回 v1.3 默认(role='subagent',无 team_*, 无 mailbox)。
+            role="lead" if getattr(app, "active_team_name", None) else "subagent",
+            tool_registry=get_default_tool_registry(),
+            mailbox_notifier=getattr(app, "mailbox_notifier", None),
         )
         self._current_agent = agent
         app._current_agent = agent

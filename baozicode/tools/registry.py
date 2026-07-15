@@ -55,9 +55,26 @@ class ToolRegistry:
         self._executors: dict[str, Executor] = dict(_BUILTIN_EXECUTORS)
         self._lock = asyncio.Lock()
 
-    def get_all_tools(self) -> list[ToolDefinition]:
-        """返回所有工具(内置在前,固定顺序;MCP 在后)。"""
-        return list(self._builtin_tools) + list(self._mcp_tools.values())
+    def get_all_tools(
+        self,
+        role: str | None = None,
+    ) -> list[ToolDefinition]:
+        """返回所有工具(内置在前,固定顺序;MCP 在后)。
+
+        v1.4 新增 `role` 参数:
+        - `role=None`(默认) — 返全部工具,完全等同 v1.3 行为(向后兼容)
+        - `role='lead' | 'member' | 'subagent' | 'coordinator'` —
+          只返 `tool.role_visibility is None` 或 `role in
+          tool.role_visibility` 的工具;Lead 才看得到 team_*,member /
+          subagent 看不到。
+        """
+        all_tools = list(self._builtin_tools) + list(self._mcp_tools.values())
+        if role is None:
+            return all_tools
+        return [
+            t for t in all_tools
+            if t.role_visibility is None or role in t.role_visibility
+        ]
 
     def get_tool(self, name: str) -> ToolDefinition | None:
         for t in self._builtin_tools:
@@ -156,8 +173,8 @@ def get_default_tool_registry() -> ToolRegistry:
     return _default
 
 
-def get_all_tools() -> list[ToolDefinition]:
-    return _default.get_all_tools()
+def get_all_tools(role: str | None = None) -> list[ToolDefinition]:
+    return _default.get_all_tools(role=role)
 
 
 def get_tool(name: str) -> ToolDefinition | None:

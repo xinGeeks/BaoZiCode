@@ -151,7 +151,7 @@ sub-Agent 在独立工作目录里跑,主 Agent 与其它 sub-Agent 不被它的
 
 v1.4 分 **4 个独立 proposal + 独立 archive** 推进:
 
-- **`v1-4-team-foundation`** (本段 — 已完成)
+- **`v1-4-team-foundation`** (已完成 — 2026-07-10)
   - Team / Member / Message 数据层(`baozicode/teams/schema.py` frozen dataclass +
     `TeamNameValidator` 严格校验 + 8 个错误枚举)
   - Mailbox 文件层(`baozicode/teams/mailbox.py` 原子 JSONL append + state.json +
@@ -162,10 +162,46 @@ v1.4 分 **4 个独立 proposal + 独立 archive** 推进:
   - CLI 子命令(`baozicode/teams/cli.py` 5 子命令 `create / list / show /
     use / destroy` + 退出码 0-5 + `Error: <Enum>: <detail>` stderr 格式)
   - App 集成(`BaoZiCodeApp._build_teams_registry` + on_mount + 顶层 CLI 分发)
-- **v1-4-team-tools** (后续) — `team_dispatch` / `team_send_message` /
-  `team_cancel` / `team_merge` 协作工具
+- **`v1-4-team-tools`** (本段 — 已完成)
+  - **共享任务清单**(`baozicode/teams/tasks.py`)`Task` frozen dataclass +
+    6 状态字面量(`pending/ready/in_progress/done/failed/canceled`)+
+    `Tasks.append` / `read_all` / `update_status` / `find_ready` /
+    `detect_cycles` 全走 `.tasks.lock` 串行化
+  - **6 个 Lead-only 协作工具**(`baozicode/teams/tools.py`)全部
+    `role_visibility=['lead']` + `register_team_tools` 注册到全局
+    `ToolRegistry`:`team_dispatch` 派活 + 标 task in_progress /
+    `team_send_message` 发任意文本(可含 APPROVED:/REJECTED:) /
+    `team_cancel` 软取消 / 强杀(`os.kill(state.backend_pid, SIGTERM)` 占位,
+    pane-backend 注入后接管) / `team_merge` 顺序合 `wt/<member>` 到 target /
+    `team_task_create` 创建带 `depends_on` 的 task 自动 8 字符 hex id +
+    cycle 检测 / `team_task_query` 按 status / assignee 过滤
+  - **Approval 协议**(`baozicode/teams/approval.py`)走 mailbox 文本格式:
+    member 写 `---PLAN-<id>--- ... ---END---` → Lead 写
+    `APPROVED: <id>` 或 `REJECTED: <id> <reason>`;
+    `ApprovalProtocol.parse_plan / parse_approval / send_approval /
+    is_task_complete / is_task_failed` 静态方法
+  - **MailboxNotifier**(`baozicode/teams/mailbox_notifier.py`)Lead Agent
+    每轮 `_inject_reminders` 之前调 `build_reminder()` 扫所有 member
+    outbox → 拼 `<system-reminder type="team_mailbox">` 块;识别
+    TASK-COMPLETE 自动 `Tasks.update_status(done)` +
+    `Mailbox.write_state(idle)`,TASK-FAILED 同理,PLAN 等待审批;
+    dedup 用 `body+timestamp` hash 防重复注入
+  - **角色过滤**:`ToolDefinition.role_visibility: list[str] | None`
+    + `ToolRegistry.get_all_tools(role=...)` + `Agent(role=...)` keyword-only
+    参数(默认 `'subagent'`),`role ∈ {'lead','member','subagent','coordinator'}`
+    严格校验;`AGENT_ROLES` frozenset 在 `tools/base.py` 顶层
+  - **App + ChatScreen 接线**:`BaoZiCodeApp.use_team(name)` 同步设
+    `active_team_name` + 构造 `MailboxNotifier`;`ChatScreen` 重建
+    Agent 时按 `app.active_team_name` 是否非空切 `role='lead'` /
+    `'subagent'`,Lead Agent 拿到 13 工具(7 内置 + 6 team_*),
+    subagent / member 拿 7 内置
+  - **team_merge helper**(`baozicode/teams/merge.py`)
+    `run_team_merge(project_root, team, *, target, dry_run=False)`
+    `git rev-parse` 校验 repo + `git checkout target` +
+    字典序 `git merge --no-ff wt/<name>` 顺序合,冲突
+    `git merge --abort` + 收集 aborted 列表,best-effort
 - **v1-4-team-pane-backend** (后续) — tmux / iTerm2 / Windows Terminal
-  pane 后端实际派生 + 唤醒
+  pane 后端实际派生 + 唤醒 + 从 `state.json` resume
 - **v1-4-team-coordinator** (后续) — 双锁开关(配置 `teams.coordinator.enabled`
   + 环境变量 `BAOZICODE_COORDINATOR=1`)+ 剥夺写文件工具
 
@@ -195,6 +231,10 @@ v1.4 分 **4 个独立 proposal + 独立 archive** 推进:
 
 **Foundation 阶段**只覆盖 schema / mailbox / lockfile / lifecycle CLI 这一层
 (决策 8 / 9 / 10 / 12),其余 9 个由后续 3 个 proposal 在此之上实现。
+
+**team-tools 阶段**在 Foundation 之上落地决策 1 / 2 / 4 / 5 / 6 / 7 / 8 / 11
+(8 个);决策 3 由 v1.3 L2 sandbox 已有 + 决策 9 / 10 foundation 已实现;
+决策 12 由 v1-4-team-pane-backend 填充 backend spawn / resume 路径。
 
 ## 模块结构
 

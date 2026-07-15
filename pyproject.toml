@@ -44,3 +44,9 @@ packages = ["baozicode"]
 [tool.hatch.build.targets.wheel.force-include]
 "config.example.yaml" = "baozicode/config.example.yaml"
 ".env.example" = "baozicode/.env.example"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

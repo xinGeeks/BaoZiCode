@@ -144,6 +144,16 @@ class BaoZiCodeApp(App):
         # disabled (config.teams is None or enabled=False) 时保持 None,
         # CLI `team` 子命令仍可工作(走 config.teams.dir bootstrap)。
         self.teams: TeamsRegistry | None = None
+        # active team — 由 `team use <name>` 设置;None 时 ChatScreen Agent
+        # 走 role='subagent'(无 team_* 工具,无 MailboxNotifier)。
+        # 设了非 None → ChatScreen 重建 Agent 时 role='lead' + 构造
+        # MailboxNotifier(teams_registry, active_team_name)。
+        self.active_team_name: str | None = None
+        # MailboxNotifier 实例(与 active_team_name 同步);每轮
+        # Agent._inject_reminders 调 build_reminder() 注入 member outbox。
+        self.mailbox_notifier: Any = None
+        # team 工具是否已注册到 ToolRegistry(幂等标记)
+        self._team_tools_registered: bool = False
 
         # ---- v0.8:SessionArchiver + sessions 列表 ----
         # sessions.bootstrap 跑过期清理、构造当前 session 的 archiver、列已有 sessions
@@ -337,6 +347,9 @@ class BaoZiCodeApp(App):
         令仍可用(走 config fallback)。
 
         Idempotent:若 `self.teams` 已构造过,直接返回,避免重复 mkdir。
+        副作用:成功构造后调 `_register_team_tools_async` 把 6 个
+        team_* 工具注册到全局 ToolRegistry(LLM 通过 role_visibility
+        看到它们)。
 
         Returns:
             `TeamsRegistry` 实例,或 None 当 disabled
@@ -349,7 +362,6 @@ class BaoZiCodeApp(App):
             return None
         try:
             self.teams = TeamsRegistry.bootstrap(self.config)
-            return self.teams
         except Exception as exc:  # noqa: BLE001
             # mkdir 失败 / 权限错 — 静默降级,LLM 看不到 team 工具但 CLI
             # 仍可走 user-default dir bootstrap 重试
@@ -360,6 +372,70 @@ class BaoZiCodeApp(App):
             )
             self.teams = None
             return None
+        # 同步注册 team 工具(幂等);同步阻塞以保证 on_mount 后工具已就绪
+        # —— ChatScreen 第一条消息到来前必须看到 team_*。
+        self._register_team_tools_sync()
+        return self.teams
+
+    def _register_team_tools_sync(self) -> None:
+        """v1.4 team-tools — 把 6 个 team_* 工具注册到全局 ToolRegistry。
+
+        用 `run_worker` 异步跑(register_team_tools 内部 await 锁),
+        但 on_mount 时还没启动 worker 队列,会推迟到第一个事件循环 tick。
+        ChatScreen 第一条消息前通常已经就绪(用户敲字需要时间)。
+
+        Idempotent:`_team_tools_registered` 标记 + register_team_tools 内
+        部撞名捕获,重复调安全。
+        """
+        if self._team_tools_registered:
+            return
+        if self.teams is None:
+            return
+        self.run_worker(
+            self._async_register_team_tools(),
+            exclusive=True,
+            name="team-tools-register",
+        )
+
+    async def _async_register_team_tools(self) -> None:
+        """run_worker 路径:在 event loop 内 async 注册。"""
+        from baozicode.teams import register_team_tools
+        from baozicode.tools.registry import get_default_tool_registry
+
+        try:
+            await register_team_tools(
+                get_default_tool_registry(), self.teams, self.project_root
+            )
+            self._team_tools_registered = True
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "team tools async 注册失败: %s: %s",
+                type(exc).__name__, exc,
+            )
+
+    def use_team(self, name: str) -> None:
+        """v1.4 team-tools — 激活 team 为 active。
+
+        设 `active_team_name` + 构造 MailboxNotifier(teams_registry,
+        active_team_name)。下一次 ChatScreen 重建 Agent 时拿到
+        role='lead' + 这个 notifier。
+
+        Args:
+            name: team 名(必须在 TeamsRegistry 里)
+
+        Raises:
+            ValueError: teams disabled 或 team 不存在
+        """
+        if self.teams is None:
+            raise ValueError(
+                "team system 未启用(config.teams.enabled=false)"
+            )
+        if self.teams.get(name) is None:
+            raise ValueError(f"team {name!r} 不存在")
+        from baozicode.teams import MailboxNotifier
+
+        self.active_team_name = name
+        self.mailbox_notifier = MailboxNotifier(self.teams, name)
 
     async def add_plugin_agents(self) -> None:
         """v1.2:MCP bootstrap 完成后调 — 拉 plugin agent 并并入 registry。"""
@@ -590,6 +666,19 @@ class BaoZiCodeApp(App):
             self.worktree_manager = None
         # v1.4:Teams Registry 释放 — TeamsRegistry 无后台线程 / daemon,仅丢引用即可
         self.teams = None
+        self.active_team_name = None
+        self.mailbox_notifier = None
+        # 注销 6 个 team_* 工具 — ToolRegistry 单例跨 App 复用,on_unmount
+        # 必须清,避免下次启动残留同名工具。
+        if self._team_tools_registered:
+            try:
+                from baozicode.teams import unregister_team_tools
+                from baozicode.tools.registry import get_default_tool_registry
+
+                await unregister_team_tools(get_default_tool_registry())
+            except Exception:  # noqa: BLE001
+                pass
+            self._team_tools_registered = False
 
     def _build_context_config(self, *, trigger: str) -> ContextConfig:
         """从 AppConfig 派生一次 ContextConfig(每次 maybe_compact 复用同一份,只在 trigger 切换时重建)。"""

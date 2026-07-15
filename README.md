@@ -608,6 +608,116 @@ worktree sub-Agent 因 `cwd` 段不同 → 首次 LLM 请求 cache miss(不引�
 
 详细:[docs/migrations/v1.1-to-v1.2.md](./docs/migrations/v1.1-to-v1.2.md)
 
+## Team Lead 协作（v1.4 Tools）
+
+把主 Agent 升级成"Team Lead"。一个长期 Group（`Team`）持久化到
+`<teams_dir>/<team>/`,Lead 可以派生多个 member 各持一份 worktree,并通过
+共享任务清单 + 点对点 mailbox 协作。这是 v1.4 的第二个 proposal
+（`v1-4-team-tools`）—— 在 `v1-4-team-foundation` 之上加 6 个 first-class
+工具。
+
+**3 类持久化**：
+
+```
+<teams_dir>/<team>/
+├── team.json                    # Team / Member / Lead 持久化
+├── tasks.jsonl                  # 共享任务清单（Lead + member 共写）
+└── <member>/
+    ├── inbox.jsonl              # member 收件箱（Lead 写 / member 读）
+    ├── outbox.jsonl             # member 发件箱（member 写 / Lead 扫）
+    ├── state.json               # { status, last_active_ts, current_task, backend_pid }
+    ├── wake.signal              # Lead touch 触发 member wake
+    └── .lock                    # mailbox 互斥锁
+```
+
+**6 个 Lead-only 工具**（`role_visibility=['lead']`,普通 sub-Agent 看不到）：
+
+| 工具                          | 作用                                                    |
+| ----------------------------- | ------------------------------------------------------- |
+| `team_dispatch`               | 派 task 给 member；可选关联 `task_id` 自动标 `in_progress` |
+| `team_send_message`           | 发任意文本到 inbox；含 `APPROVED: <id>` / `REJECTED: <id>` 触发审批 |
+| `team_cancel`                 | 软取消当前 task / `terminate=true` 强杀后端             |
+| `team_merge`                  | 顺序合各 `wt/<member>` 分支到 target；冲突 `git merge --abort` |
+| `team_task_create`            | 写 task 到 `tasks.jsonl`；带 `depends_on`；自动 cycle 检测 |
+| `team_task_query`             | 按 status / assignee 过滤 + `include_ready_graph` 取 ready 任务 |
+
+**典型流（Lead LLM 视角）**：
+
+```
+用户: "用 devops 团队把这个项目拆 3 个 task 并行做"
+  │
+  ├─ Lead LLM: team_task_create("改 api/users.py", depends_on=[])
+  │  → 返回 task_id="3f4a7c01"
+  ├─ Lead LLM: team_task_create("改 tests/", depends_on=["3f4a7c01"])
+  ├─ Lead LLM: team_task_create("改 docs/", depends_on=["3f4a7c01"])
+  │  → 第二个立刻 ready(dependency satisfied)
+  │
+  ├─ Lead LLM: team_dispatch(team=devops, member=alice, task_id="3f4a7c01")
+  │            team_dispatch(team=devops, member=bob,   task_id="<第二个 task>")
+  │  → 各自 worktree 里跑,完成后写 outbox:
+  │     `---TASK-COMPLETE-<id>--- ... ---END---`
+  │
+  ├─ MailboxNotifier 每轮扫 outbox → 注入 <system-reminder type="team_mailbox">
+  │   看到 TASK-COMPLETE → 自动 Tasks.update_status(done) + state.idle
+  │
+  ├─ Lead LLM: team_task_query(team=devops, status_filter=["ready"])
+  │            team_dispatch(第三个 task 给第三个 member)
+  │
+  └─ Lead LLM: team_merge(team=devops, target=main)
+     → 字典序 git merge --no-ff wt/<member>;冲突 abort + 返 aborted 列表
+```
+
+**任务依赖 DAG**：
+
+```
+t-001 (改 api/)  ─┐
+                  ├──> t-003 (端到端测试) ──> t-004 (docs)
+t-002 (改 config) ┘
+```
+
+- 创建 t-003 时 `depends_on=["t-001", "t-002"]`,两个都 done 之后才 `ready`
+- 失败 dep 当 blocker(不视作 "passed" dep)
+- `Tasks.detect_cycles` 在 create 时 DFS 检测成环并抛 `TaskCycleError`
+
+**Approval 协议**（`requires_approval=true` 的 member）：
+
+```
+member outbox  →  ---PLAN-3f4a7c---
+                  我会先改 X 然后补 Y
+                  ---END---
+                          ↓ MailboxNotifier 扫
+                  <system-reminder type="team_mailbox">
+                  alice (waiting) submitted plan 3f4a7c:
+                    我会先改 X 然后补 Y
+                    回复: APPROVED: 3f4a7c 或 REJECTED: 3f4a7c <reason>
+                  </system-reminder>
+                          ↓ Lead LLM 看
+Lead 用 team_send_message(team, alice, "APPROVED: 3f4a7c") 批准
+或          team_send_message(team, alice, "REJECTED: 3f4a7c 别改 X") 驳回
+                          ↓ inbox 新行,member 醒来看
+```
+
+**激活**：
+
+```bash
+# 建 team(CLI 命令在 v1.4 Foundation 已有)
+baozicode team create devops
+baozicode team show devops --json | jq '.lead'
+
+# 激活 → 下一次 Agent 重建自动 role='lead' + 13 工具 + MailboxNotifier
+baozicode team use devops
+# 或在 TUI 内调 /session use devops
+```
+
+**未做的事**（留给后续 2 个 proposal）：
+
+- **v1-4-team-pane-backend** —— tmux / iTerm2 / Windows Terminal 派成员 + watchdog wake + resume
+- **v1-4-team-coordinator** —— 双锁开关 + Lead 自动剥夺写文件工具
+
+详细：[docs/migrations/v1.4-foundation-to-v1.4-tools.md](./docs/migrations/v1.4-foundation-to-v1.4-tools.md)
+
+---
+
 ## 权限系统（v0.5 五层防御）
 
 工具调用通过 5 层防御逐级放行,**deny-veto**(任何层 deny 即拒,即使其它层 allow):

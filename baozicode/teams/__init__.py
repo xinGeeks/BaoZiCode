@@ -63,14 +63,22 @@ from .schema import (
     default_member_state,
     fill_message_timestamp,
 )
+from .approval import ApprovalAction, ApprovalProtocol
+from .mailbox_notifier import MailboxNotifier
+from .merge import run_team_merge
 from .store import TeamStore
+from .tasks import Task, TaskCycleError, Tasks, TaskStatus
+from .tools import register_team_tools, unregister_team_tools
 
 __all__ = [
+    "ApprovalAction",
+    "ApprovalProtocol",
     "BackendType",
     "Direction",
     "Mailbox",
     "MailboxLockError",
     "MailboxLockTimeout",
+    "MailboxNotifier",
     "Member",
     "MemberAlreadyExists",
     "MemberNotFound",
@@ -79,6 +87,10 @@ __all__ = [
     "Message",
     "MESSAGE_SCHEMA_VERSION",
     "TEAM_SCHEMA_VERSION",
+    "Task",
+    "TaskCycleError",
+    "TaskStatus",
+    "Tasks",
     "Team",
     "TeamAlreadyExists",
     "TeamNameBadChar",
@@ -95,4 +107,7 @@ __all__ = [
     "default_member_state",
     "fill_message_timestamp",
     "mailbox_lock",
+    "register_team_tools",
+    "run_team_merge",
+    "unregister_team_tools",
 ]
