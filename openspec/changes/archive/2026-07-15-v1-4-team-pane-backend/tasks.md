@@ -233,9 +233,9 @@
 - [x] 9.7 `openspec validate v1-4-team-pane-backend --strict` 通过
 - [x] 9.8 CHANGELOG + CLAUDE.md + README + config.example.yaml +
       migration doc 同步
-- [ ] 9.9 `git commit -m "feat(v1.4-pane-backend): 5 BackendType 实现
+- [x] 9.9 `git commit -m "feat(v1.4-pane-backend): 5 BackendType 实现
       + BackendManager + pane_info.json 持久化 + baozicode member
       run CLI + MemberMainLoop long-lived polling"`
-- [ ] 9.10 `openspec archive v1-4-team-pane-backend`(specs 合并到
-      `openspec/specs/team-management/`)
+- [x] 9.10 `openspec archive v1-4-team-pane-backend`(specs 合并到
+      `openspec/specs/team-management/` — 24 个 Requirement 全部合并)
 
