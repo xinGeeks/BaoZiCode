@@ -2,7 +2,7 @@
 
 > 一个用 Python 开发的命令行 AI 编码助手，类似 Claude Code。
 
-![version](https://img.shields.io/badge/version-1.3.0-blue)
+![version](https://img.shields.io/badge/version-1.5.0-blue)
 
 ## 是什么
 
@@ -45,13 +45,13 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   3 级存放 project > user > builtin;两种执行模式 `shared`(主对话)/ `independent`
   (子对话);L1 启动期校验 `allowed-tools` 全部存在 + L2 运行期收窄到 union 命中放行;
   3 个内置 Skill(`commit` / `review` / `test`),`load_skill` 是 system 工具永远放行
-- 🤖 **SubAgent 委派（v1.2 新增）** — 主 Agent 通过统一 `task` 工具派子任务给独立
+- 🤖 **SubAgent 委派（v1.2 新增，v1.5 修复）** — 主 Agent 通过统一 `task` 工具派子任务给独立
   sub-Agent。两条派发路径:`definition`(干净上下文 + 角色身份,4 层 AND 工具过滤,
   `GLOBAL_DENY={task}` 硬禁嵌套)/ `fork`(共享主对话历史,prompt cache byte-identical
-  命中,省钱)。默认 `async: true` 后台跑,sync 可设 `timeout_seconds` 超时自动切后台;
-  3 种进入后台方式(显式 / 超时 / 手动 demote);主 Agent cancel 级联 cancel_all。
-  2 个内置样板:`explorer`(Read/Grep/Glob/WebFetch)/ `summarizer`(Read/Grep/Glob + haiku)
-  。**Breaking**:v1.0 旧 `SkillExecutor.independent_runner` 注入路径删除,独立模式
+  命中,省钱)。**v1.5 起 `async_=True` 是唯一路径**(同步路径删除,`async_=False`
+  抛 `NotImplementedError`),后台跑 + 轮询 `task.state`;主 Agent cancel 级联 cancel_all。
+  2 个内置样板:`explorer`(Read/Grep/Glob/WebFetch)/ `summarizer`(**v1.5 起 `tools: []`
+  显式空工具集** + haiku)。**Breaking**:v1.0 旧 `SkillExecutor.independent_runner` 注入路径删除,独立模式
   重走 SubAgent 通道
 - 🌲 **Worktree 隔离（v1.3 新增，可选）** — sub-Agent role frontmatter 加
   `isolation: worktree`,让该 sub-Agent 在独立 git worktree 里跑,与主 Agent /
@@ -70,7 +70,29 @@ BaoZiCode 是一个跑在终端里的多轮 AI 对话 TUI。它支持：
   `baozicode team create/list/show/use/destroy` 5 子命令。tools / pane
   后端已完成;coordinator 模式留给后续 proposal。
 
-## 当前版本：v1.4 (Pane Backend)
+## 当前版本：v1.5 (SubAgent 修复)
+
+- ✅ **SubAgent 委派修复(v1.5 新增)** — `baozicode/agents/`
+  - **`tools: []` 显式空工具集合法**(`filter.py`)—— 角色 frontmatter 写
+    `tools: []` 现在是「主动声明我要空工具集」的合法路径,直接放行;区别于
+    `tools: null`(无约束,全允许)。ToolFilter 用 `_l2_explicit_empty` 状态位
+    区分「显式空」与「过滤后意外为空」,后者才抛 `ToolFilterEmptyError`。
+    内置 `summarizer` 角色改用 `tools: []`,现在可正常派发
+  - **同步派发路径删除,`async_=True` 成为唯一路径**(`manager.py`)——
+    `dispatch(async_=False)` 直接抛 `NotImplementedError`;删除
+    `_dispatch_sync_blocking`(它在 running event loop 里返回未 await 的 Task
+    对象,导致调用方卡死 / `GeneratorExit`)。LLM 若在 `task` 工具里显式传
+    `async: false` → `task_executor` 返回 `ToolResult(is_error=True)` 反馈,
+    不静默 fallback。TUI / CLI 全走 `async_=True` + 轮询 `task.state`
+
+- ✅ **Team Coordinator 监督者模式(v1.4 完成)** — `baozicode/teams/coordinator.py`
+  - **三锁门**:配置 `teams.coordinator.enabled` + 环境变量 `BAOZICODE_COORDINATOR`
+    (truthy)+ `team.json` 含 `coordinator: true`,三处齐备才启用,任一缺失降级
+    Lead + stderr 报告缺哪个
+  - **写类工具剔除**:coordinator role 看不到 `Write` / `Edit` / `Bash`,只留
+    Read / Grep / Glob / WebFetch + 6 个 `team_*`;`tool_type='internal'`
+    工具(`load_skill` / `task`)不受剔除
+  - CLI `baozicode team use --coordinator <team>` + `App.active_role` 接线
 
 - ✅ **Worktree 隔离(v1.3 新增 — 主特性)** — `baozicode/worktree/`
   - sub-Agent role frontmatter 加 `isolation: worktree` → 该 sub-Agent 在独立
@@ -491,17 +513,21 @@ skills:
   {"type": "fork", "prompt": "基于上面结果筛匹配 pattern X 的文件"}
   ```
 
-`async: true`(默认)→ 派完即返回 task_id 后台跑;`async: false` 阻塞等结果
-(可设 `timeout_seconds` 超时自动切后台);**fork 强制后台**(sync 路径打 warning
-后强制 async 走后台)。
+**v1.5 起 `async: true` 是唯一支持路径**:派完即返回 task_id 后台跑,调用方轮询
+`task.state`(`done` / `failed` / `canceled` / `timeout`)拿结果。`async: false`
+已删除 —— `SubAgentManager.dispatch(async_=False)` 抛 `NotImplementedError`;LLM 若
+在 `task` 工具里显式传 `async: false`,`task_executor` 返回 `ToolResult(is_error=True)`
+提示改用 `async: true`,不静默 fallback。
 
-### 三种进入后台的方式
+> **为什么删同步路径**:旧 `_dispatch_sync_blocking` 在 running event loop 里走
+> `loop.create_task()` 返回未 await 的 Task 对象,调用方拿到 Task 却没人 await →
+> task 永远 pending / `GeneratorExit`。同步阻塞主 loop 本身就是 anti-pattern,且
+> 生产代码零调用点,故 v1.5 彻底移除。
 
-| 方式 | 触发 | 备注 |
-|------|------|------|
-| **显式 `async: true`** | LLM 调 `task` 工具时直接传 | 默认行为,派完返回 task_id |
-| **sync 超时** | `async: false` + `timeout_seconds`,子 Agent 跑超时 | 自动切后台,本轮不阻塞 |
-| **手动切** | `request_subagent_async(task_id)` 手动 demote running sync task | 调试 / 想取消时用 |
+### 后台运行
+
+`async: true`(v1.5 起唯一)→ 派完立即返回 task_id,子 Agent 后台跑;
+`request_subagent_async(task_id)` 可手动 demote 一个 running task(调试用)。
 
 ### 角色定义
 
@@ -526,13 +552,22 @@ permission-mode: permissive
 
 ```
 GLOBAL_DENY = {task}     # L1 ── 硬禁嵌套(子 Agent 不能调 task 工具)
-role.tools: [...]        # L2 ── 角色白名单(None = 全允许)
+role.tools: [...]        # L2 ── 角色白名单(None = 全允许;[] = 显式空,合法放行 v1.5)
 role.tools_deny: [...]   # L3 ── 角色黑名单
 background_whitelist     # L4 ── 后台模式额外白名单(默认 Read / Grep / Glob /
                          #       WebFetch / notify_complete)
 ```
 
-任一层过滤后为空 → `ToolFilterEmptyError`,dispatch 时被捕获转 `ToolResult(is_error=True)`。
+**`tools: []` vs `tools: null`(v1.5 语义)**:
+
+| frontmatter | 含义 | 结果 |
+|------|------|------|
+| `tools: null`(或不写)| 无 L2 约束 | 全工具允许(减 GLOBAL_DENY) |
+| `tools: []` | 显式声明「我要空工具集」 | 放行空集,**不报错**(内置 `summarizer` 用这个) |
+| 其它层过滤后意外为空 | 配置冲突(如 `tools: [Read]` + `tools_deny: [Read]`)| `ToolFilterEmptyError` → `ToolResult(is_error=True)` |
+
+ToolFilter 用 `_l2_explicit_empty` 状态位区分「显式空」与「过滤后空」,只有后者抛
+`ToolFilterEmptyError`(dispatch 时被捕获转 `ToolResult`)。
 
 ### 状态回流
 
@@ -708,10 +743,10 @@ baozicode team use devops
 # 或在 TUI 内调 /session use devops
 ```
 
-**未做的事**（留给后续 2 个 proposal）：
+**已完成的后续 proposal**:
 
 - **v1-4-team-pane-backend** —— tmux / iTerm2 / Windows Terminal 派成员 + watchdog wake + resume
-- **v1-4-team-coordinator** —— 双锁开关 + Lead 自动剥夺写文件工具
+- **v1-4-team-coordinator** —— 三锁门 + Lead 自动剥夺写文件工具(见下方 Coordinator Mode 章节)
 
 ## Member Runtime(v1.4 Pane Backend)
 
@@ -1021,7 +1056,7 @@ Agent Loop 是异步生成器,TUI 只是 consumer — Agent 完全可以被 head
 (`Write` / `Edit` / `Bash`)风险过大 — Lead 误改文件可能覆盖
 member 已完成的工作。**Coordinator 模式** 限制 Lead 的写类工具,
 只留观察 + 协作能力,由 member 完成实际写动作。这是 v1.4 的第 4 个
-proposal(`v1-4-team-coordinator`)。
+proposal(`v1-4-team-coordinator`,已完成)。
 
 ### 三锁门
 

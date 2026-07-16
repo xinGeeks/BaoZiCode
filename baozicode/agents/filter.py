@@ -66,12 +66,16 @@ class ToolFilter:
         self._is_background = is_background
         self._background_whitelist = set(background_whitelist)
         self._all_tools = list(all_tools)
+        # v1.5:跟踪 L2 是否显式声明空工具集(role.tools == [] 而非 None)。
+        # visible_tools 空集时,显式空 = 合法放行;否则 = 配置冲突报错。
+        self._l2_explicit_empty: bool = False
 
     @cached_property
     def visible_tools(self) -> list[ToolDefinition]:
         """过滤后的可见工具列表(顺序与 all_tools 一致)。
 
-        抛 `ToolFilterEmptyError`:4 层过滤后空集。
+        抛 `ToolFilterEmptyError`:4 层过滤后空集,且 L2 不是显式空。
+        L2 显式空(`role.tools == []`)→ 返回空 list,合法。
         """
         # 第 0 层:fork 模式不调用 ToolFilter(继承父工具)。
         # 调用方负责判断 type,这里仅防御性校验。
@@ -84,10 +88,14 @@ class ToolFilter:
         # ---- L1: GLOBAL_DENY ----
         l1_after = [t for t in tools if t.name not in GLOBAL_DENY]
 
-        # ---- L2: role.tools(白名单,None = 全放行)----
+        # ---- L2: role.tools(白名单)
+        #   - None = 无约束(全放行)
+        #   - []   = 显式空(角色主动声明"我要空工具集",允许空集返回)
+        #   - [..] = 白名单
         role = self._role_def
         if role is not None and role.tools is not None:
             allow = set(role.tools)
+            self._l2_explicit_empty = (allow == set())
             l2_after = [t for t in l1_after if t.name in allow]
         else:
             l2_after = l1_after
@@ -111,6 +119,10 @@ class ToolFilter:
         final = [t for t in l4_after if t.name not in GLOBAL_DENY]
 
         if not final:
+            # v1.5:L2 显式空 = 合法声明,放行(角色主动声明"我要空工具集")
+            if self._l2_explicit_empty:
+                return []
+            # 否则 = 配置冲突,报错
             states = self.layer_states
             raise ToolFilterEmptyError(
                 f"visible_tools 为空: {states}",
@@ -127,6 +139,7 @@ class ToolFilter:
             "L2_role_tools": (
                 sorted(role.tools) if role is not None and role.tools else None
             ),
+            "L2_explicit_empty": self._l2_explicit_empty,
             "L3_role_tools_deny": (
                 sorted(role.tools_deny)
                 if role is not None and role.tools_deny

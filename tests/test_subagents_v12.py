@@ -779,18 +779,15 @@ class TestSubAgentManager:
         assert "并发上限" in result.content
 
     async def test_dispatch_fork_forces_async(self) -> None:
-        """fork + async=False → 自动转 async(D8)。"""
+        """v1.5:fork + async_=False 抛 NotImplementedError(同步路径已删,D8 不再适用)。"""
         m = self._build_manager()
-        # fork 模式 + 无 parent_agent → ValueError(manager 包装成 ToolResult)
-        result = await m.dispatch(
-            type="fork", role=None, prompt="x", async_=False,
-            parent_conversation=None, parent_denied_counts=None,
-            parent_agent=None,
-        )
-        # 强制 async 后会进入 spawn 路径,因 parent_messages 缺 ValueError
-        assert isinstance(result, ToolResult)
-        assert result.is_error
-        assert "fork 模式 parent_messages 必填" in result.content
+        with pytest.raises(NotImplementedError) as exc_info:
+            await m.dispatch(
+                type="fork", role=None, prompt="x", async_=False,
+                parent_conversation=None, parent_denied_counts=None,
+                parent_agent=None,
+            )
+        assert "v1.5" in str(exc_info.value)
 
     def test_drain_pending_notifications_only_terminal(self) -> None:
         m = self._build_manager()

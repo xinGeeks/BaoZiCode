@@ -15,9 +15,9 @@
     └──── retention 过期后被清理 ────┘(lazy,下次 dispatch/list_tasks 时扫)
 
 派发路径:
-- async=True:asyncio.create_task 跑后台,返回 task_id
-- async=False:await 阻塞到完成(或 timeout demote)
-- fork + async=False:warning + 强制 async(子任务必须后台跑才能 cache 命中)
+- async_=True:asyncio.create_task 跑后台,返回 task_id
+- async_=False:自 v1.5 起禁用,dispatch() 抛 NotImplementedError
+- fork 强制 async_(子任务必须后台跑才能 cache 命中)
 """
 
 from __future__ import annotations
@@ -207,23 +207,33 @@ class SubAgentManager:
             type: "definition" / "fork"
             role: definition 模式的 role 名;fork 模式 None
             prompt: 任务 prompt(已替换占位符)
-            async_: True(默认)= 后台跑,返回 task_id;
-                    False = 阻塞到完成(或 timeout demote)
-            timeout_seconds: sync 模式专属,超时后 demote 到后台
+            async_: 必须是 True(默认)。False 自 v1.5 起被禁用,
+                    调 dispatch(async_=False) 抛 NotImplementedError。
+            timeout_seconds: 已废弃(自 v1.5 起 sync 路径删除)
             parent_conversation: fork 模式必填,snapshot 来源
             parent_denied_counts: fork 模式必填,初始 session_rules
             parent_agent: fork 模式必填,共享 _prompt
 
         Returns:
-            - async=True → str(task_id)
-            - async=False → str(完成摘要) 或 str("[sub-Agent 超时自动切后台...]")
+            - async_=True → str(task_id)
+            - async_=False → 抛 NotImplementedError(v1.5 起)
             - 错误(未知 role / ToolFilter 空集) → ToolResult(is_error=True)
               注意:错误时**不**抛,直接返回 ToolResult,这样 task tool 走 LLM 路径
               时也能拿到错误反馈
 
         v1.3 变更:`async def`(原本 sync);`spawn` 因 worktree 创建
         需要 await,沿链路向上翻成 async。
+        v1.5 变更:`async_=False` 同步路径删除(原 _dispatch_sync_blocking 有 bug:
+        在 running event loop 里返回 Task 而不 await)。
         """
+        # v1.5:sync 路径已删除。async_=False 直接抛 NotImplementedError,
+        # 不静默 fallback 到 async 也不返回 Task — 立即 fail-fast 让调用方知道。
+        if not async_:
+            raise NotImplementedError(
+                "SubAgentManager.dispatch(async_=False) 自 v1.5 起被禁用。"
+                "请使用 async_=True 并轮询 task.state / 监听 idle notification。"
+            )
+
         self._cleanup_expired()
 
         # ---- fork 强制 async(D8)----
@@ -301,55 +311,11 @@ class SubAgentManager:
         task.worktree_state = getattr(sub_agent, "_worktree_state", None)
         self._tasks[task_id] = task
 
-        if async_:
-            # 后台跑
-            asyncio_task = asyncio.create_task(self._run_subagent(task))
-            self._asyncio_tasks[task_id] = asyncio_task
-            return task_id
-
-        # sync 阻塞路径
-        return self._dispatch_sync_blocking(task, timeout_seconds)
-
-    def _dispatch_sync_blocking(
-        self,
-        task: TaskInfo,
-        timeout_seconds: int | None,
-    ) -> str:
-        """同步阻塞路径 — 跑 sub-Agent,等结果;超时则 demote 到后台。"""
-        async def _runner() -> str:
-            # 派一个真正跑 task 的协程,等结果
-            runner_task = asyncio.create_task(self._run_subagent(task))
-            self._asyncio_tasks[task.task_id] = runner_task
-            if timeout_seconds is None:
-                # 无限等
-                await runner_task
-                return task.result or "(无输出)"
-            try:
-                await asyncio.wait_for(runner_task, timeout=timeout_seconds)
-                return task.result or "(无输出)"
-            except asyncio.TimeoutError:
-                # demote 到后台
-                log.warning(
-                    "sub-Agent %s 超过 timeout=%ds,demote 到后台",
-                    task.task_id, timeout_seconds,
-                )
-                task.state = "timeout"
-                task.notification_pending = True
-                self._on_subagent_done(task)
-                return (
-                    f"[sub-Agent 超时自动切后台,task_id={task.task_id}]"
-                )
-
-        # 在新的 event loop 里跑(确保 sync 路径不阻塞主 loop)
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 主 loop 在跑(常见) — 起一个临时 task 等
-                return loop.create_task(_runner())  # type: ignore[return-value]
-            return loop.run_until_complete(_runner())
-        except RuntimeError:
-            # 无 loop,自己开一个
-            return asyncio.run(_runner())
+        # v1.5:async 唯一路径 — async_=False 已在入口抛 NotImplementedError,
+        # 走到这里时 async_ 必为 True
+        asyncio_task = asyncio.create_task(self._run_subagent(task))
+        self._asyncio_tasks[task_id] = asyncio_task
+        return task_id
 
     # ---- 取消 API ----
 
@@ -721,6 +687,17 @@ async def task_executor(arguments: dict, *, manager_getter: Callable[[], "SubAge
             tool_call_id="",
             message="task.prompt 必填",
         )
+    # v1.5:async 唯一路径。LLM 显式传 async=False 也要拒(返回 ToolResult
+    # error_result,跟其他参数错误的处理一致 — task tool 错误不抛,走 LLM 反馈)。
+    if arguments.get("async", True) is False:
+        return ToolResult.error_result(
+            tool_call_id="",
+            message=(
+                "task.async=False 自 v1.5 起被禁用。"
+                "请省略该参数(默认 async=True)或显式传 true,"
+                "然后轮询 task_id 完成状态 / 监听 idle notification。"
+            ),
+        )
 
     # 主 Agent 句柄 late-binding — 用 manager 自己的 _main_agent_ref
     parent_agent = (
@@ -732,8 +709,6 @@ async def task_executor(arguments: dict, *, manager_getter: Callable[[], "SubAge
         type=type_str,  # type: ignore[arg-type]
         role=arguments.get("role"),
         prompt=prompt,
-        async_=arguments.get("async", True),
-        timeout_seconds=arguments.get("timeout_seconds"),
         parent_agent=parent_agent,
     )
 
@@ -744,23 +719,21 @@ async def _do_dispatch(
     type: Literal["definition", "fork"],  # noqa: A002
     role: str | None,
     prompt: str,
-    async_: bool,
-    timeout_seconds: int | None,
     parent_agent: "Agent | None",
 ) -> ToolResult:
     """实际调 manager.dispatch,把 ToolResult 错误路径包成 ToolResult。
 
-    dispatch 返回 3 类值:
+    v1.5:async_/timeout_seconds 参数删除 — 同步路径已废弃,只走 async。
+
+    dispatch 返回 2 类值:
     - task_id (str):async 成功
-    - summary str:sync 成功
-    - ToolResult:错误 / 超时 demote(已经是 ToolResult 直接返回)
+    - ToolResult:错误(已经是 ToolResult 直接返回)
     """
     raw = await manager.dispatch(
         type=type,
         role=role,
         prompt=prompt,
-        async_=async_,
-        timeout_seconds=timeout_seconds,
+        async_=True,
         parent_conversation=manager._main_conv if type == "fork" else None,
         parent_denied_counts=None,
         parent_agent=parent_agent if type == "fork" else None,
@@ -768,16 +741,13 @@ async def _do_dispatch(
     if isinstance(raw, ToolResult):
         return raw  # 错误已包装
     # success path: raw is task_id (str)
-    if async_:
-        return ToolResult.success(
-            tool_call_id="",
-            content=(
-                f"[sub-Agent 已派发,task_id={raw},"
-                f" 完成时主 Agent 顶部会有通知]"
-            ),
-        )
-    # sync path: raw is summary str
-    return ToolResult.success(tool_call_id="", content=str(raw))
+    return ToolResult.success(
+        tool_call_id="",
+        content=(
+            f"[sub-Agent 已派发,task_id={raw},"
+            f" 完成时主 Agent 顶部会有通知]"
+        ),
+    )
 
 
 __all__ = [

@@ -1,7 +1,7 @@
 ---
 name: summarizer
 description: 把长文本 / 代码段 / 错误日志浓缩为 3 段摘要
-tools-deny: [Write, Edit, Bash, Read, Grep, Glob, WebFetch]
+tools: []
 model: haiku
 max-iterations: 5
 permission-mode: permissive
@@ -16,7 +16,8 @@ nesting-depth: 0
 
 ## 注意
 
-- 你**没有**任何工具(`tools-deny` 禁用了所有),纯靠 LLM 能力
+- 这是**无工具角色** — `tools: []` 是显式声明"我要空工具集",
+  ToolFilter 接受空集返回(不会报 ToolFilterEmptyError)
 - 用 haiku 模型跑(快 + 便宜),只适合短文本
 - 超过 8000 token 的输入,在第一段开头加 "输入超长,先压缩前置内容"
 - 输出**不**超过 500 token
